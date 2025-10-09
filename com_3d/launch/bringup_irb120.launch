@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="robot_ip" doc="The robot controller's IP address"/>
+  <arg name="rws_username" default="" />
+  <arg name="rws_password" default="" />
+  <arg name="debug" default="false"/>
+  <env if="$(arg debug)" name="ROSCONSOLE_CONFIG_FILE" value="$(find com_3d)/config/rosconsole.conf"/>
+
+  <!-- ============================================================================================================= -->
+  <!-- Robot Web Services (RWS) related components.                                                                  -->
+  <!-- ============================================================================================================= -->
+
+  <!-- RWS state publisher (i.e. general states about the robot controller) -->
+  <include file="$(find abb_rws_state_publisher)/launch/rws_state_publisher.launch">
+    <arg name="robot_ip" value="$(arg robot_ip)"/>
+    <arg name="username" value="$(arg rws_username)"/>
+    <arg name="password" value="$(arg rws_password)"/>
+  </include>
+
+  <!-- RWS service provider (i.a. starting/stopping the robot controller's RAPID execution) -->
+  <include file="$(find abb_rws_service_provider)/launch/rws_service_provider.launch">
+    <arg name="robot_ip" value="$(arg robot_ip)"/>
+    <arg name="username" value="$(arg rws_username)"/>
+    <arg name="password" value="$(arg rws_password)"/>
+  </include>
+
+  <!-- ============================================================================================================= -->
+  <!-- Externally Guided Motion (EGM) related components.                                                            -->
+  <!--                                                                                                               -->
+  <!-- Notes:                                                                                                        -->
+  <!-- * This example assumes that a 6-axes robot is used.                                                           -->
+  <!-- * An EGM session must be in running mode before starting 'ros_control' controllers that command motions.      -->
+  <!-- ============================================================================================================= -->
+
+  <!-- EGM hardware interface (i.e. 'ros_control'-based interface for interacting with mechanical units) -->
+  <include file="$(find abb_egm_hardware_interface)/launch/egm_hardware_interface.launch">
+    <arg name="base_config_file" value="$(find com_3d)/config/ex2_hardware_base.yaml"/>
+    <arg name="egm_config_file" value="$(find com_3d)/config/ex2_hardware_egm.yaml"/>
+    <arg name="output" value="screen"/>
+    <arg name="username" value="$(arg rws_username)"/>
+    <arg name="password" value="$(arg rws_password)"/>
+  </include>
+
+  <!-- Put 'ros_control' components in the "egm" namespace (to match the hardware interface) -->
+  <group ns="egm">
+  <!-- move_group ns didn't seem to work -->
+    <!-- Load configurations for 'ros_control' controllers on the parameter server -->
+    <rosparam command="load"
+              file="$(find com_3d)/config/ex2_controllers.yaml"/>
+    <!-- <rosparam command="load"
+              file="$(find com_3d)/config/moveit_controllers.yaml"
+              param="abb_irb120_3_58"/> -->
+    
+    <!-- Two 'ros_control' controller spawners (stopped for the controller that command motions) -->
+    <node pkg="controller_manager" type="spawner" name="started"
+          args="egm_state_controller joint_state_controller" output="screen" respawn="true" respawn_delay="2.0"/>
+    <node pkg="controller_manager" type="spawner" name="traj_stopped"
+          args="--stopped joint_trajectory_controller" output="screen" respawn="true" respawn_delay="2.0"/>
+  </group>
+
+  <!-- HYLAND ADDED THE BELOW -->
+  <param name="robot_description"
+       command="$(find xacro)/xacro --inorder $(find abb_irb120_support)/urdf/irb120_3_58.xacro"/>
+  
+  <!-- <remap from="/joint_states" to="/egm/joint_states"/> -->
+
+  <!-- 3) (Optional) Expose a /joint_states alias for other nodes/tools -->
+  <node pkg="topic_tools"
+        type="relay"
+        name="joint_states_alias"
+        args="/egm/joint_states /joint_states"
+        output="screen" />
+
+</launch>
