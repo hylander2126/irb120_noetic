@@ -41,30 +41,30 @@
     <arg name="password" value="$(arg rws_password)"/>
   </include>
 
+
   <!-- Put 'ros_control' components in the "egm" namespace (to match the hardware interface) -->
   <group ns="egm">
-  <!-- move_group ns didn't seem to work -->
     <!-- Load configurations for 'ros_control' controllers on the parameter server -->
     <rosparam command="load"
               file="$(find com_3d)/config/ex2_controllers.yaml"/>
-    <!-- <rosparam command="load"
-              file="$(find com_3d)/config/moveit_controllers.yaml"
-              param="abb_irb120_3_58"/> -->
     
     <!-- Two 'ros_control' controller spawners (stopped for the controller that command motions) -->
-    <node pkg="controller_manager" type="spawner" name="started"
-          args="egm_state_controller joint_state_controller" output="screen" respawn="true" respawn_delay="2.0"/>
-    <node pkg="controller_manager" type="spawner" name="traj_stopped"
-          args="--stopped joint_trajectory_controller" output="screen" respawn="true" respawn_delay="2.0"/>
+    <node pkg="controller_manager" type="spawner" 
+      name="started"
+      args="egm_state_controller joint_state_controller" 
+      output="screen" 
+      respawn="true" 
+      respawn_delay="2.0"/>
+    
+    <node pkg="controller_manager" type="spawner" 
+      name="jtc_spawner"
+      args="--stopped joint_trajectory_controller"
+      output="screen" 
+      respawn="true" 
+      respawn_delay="2.0"/>
   </group>
 
-  <!-- HYLAND ADDED THE BELOW -->
-  <param name="robot_description"
-       command="$(find xacro)/xacro --inorder $(find abb_irb120_support)/urdf/irb120_3_58.xacro"/>
-  
-  <!-- <remap from="/joint_states" to="/egm/joint_states"/> -->
-
-  <!-- 3) (Optional) Expose a /joint_states alias for other nodes/tools -->
+  <!-- (Optional) Expose a /joint_states alias for other nodes/tools -->
   <node pkg="topic_tools"
         type="relay"
         name="joint_states_alias"

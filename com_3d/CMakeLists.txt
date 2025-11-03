@@ -156,8 +156,12 @@ include_directories(
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
-  scripts/egm_settings_apply.py
-  scripts/netft_publisher.py
+  scripts/egm_settings_and_jtc_init.py
+  scripts/apriltag_logger.py
+  scripts/netft_logger.py
+  scripts/shutdown_handler.py
+  scripts/transform_netft.py
+  scripts/ee_pose_logger.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

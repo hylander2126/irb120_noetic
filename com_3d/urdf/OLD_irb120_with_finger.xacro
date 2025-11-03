@@ -1,0 +1,113 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="abb_irb120_3_58"> <!-- THIS HAS TO MATCH THE SEMANTIC DESCRIPTION MOVEIT HAS (see launch)-->
+
+  <!-- Include the stock ABB IRB120 -->
+  <!-- TODO: Should this be Gazebo? Or the default one under the parent irb120_support??? -->
+  <!-- <xacro:include filename="$(find abb_irb120_gazebo)/urdf/irb120_3_58.xacro"/> -->
+  <xacro:include filename="$(find abb_irb120_support)/urdf/irb120_3_58.xacro"/>
+
+  <!-- ====== Params you can tweak ====== -->
+  <xacro:property name="tool_mass" value="0.25"/>          <!-- kg (sensor+finger) -->
+  <xacro:property name="tool_cog_z" value="0.06"/>         <!-- m in tool frame -->
+  <xacro:property name="ft_z" value="0.083"/>              <!-- FT sensor height -->
+  <xacro:property name="adapter_z" value="0.0"/>         <!-- 0.01 adapter height -->
+  <xacro:property name="finger_z" value="0.090"/>          <!-- finger length -->
+  <!-- Total offset from link_6 to finger tip will be ft_z + adapter_z + finger_z -->
+
+  <!-- ====== FT sensor link mounted to link_6 ====== -->
+  <link name="ft_link">
+    <inertial>
+      <origin xyz="0 0 ${tool_cog_z}" rpy="0 0 0"/>
+      <mass value="${tool_mass}"/>
+      <!-- simple diagonal inertia; refine if you have CAD -->
+      <inertia ixx="5e-4" iyy="5e-4" izz="5e-4" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 ${ft_z/2}" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.025" length="${ft_z}"/></geometry>
+      <material name="Grey"><color rgba="0.8 0.8 0.8 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${ft_z/2}" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.026" length="${ft_z}"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="link_6_to_ft" type="fixed">
+    <parent link="link_6"/>
+    <!-- Adjust xyz/rpy to match your real mounting orientation -->
+    <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+    <child link="ft_link"/>
+  </joint>
+
+  <!-- ====== Finger adapter (optional spacer) ====== -->
+  <link name="finger_adapter">
+    <visual>
+      <origin xyz="0 0 ${adapter_z/2}" rpy="0 0 0"/>
+      <geometry><box size="0.04 0.04 ${adapter_z}"/></geometry>
+      <material name="Black"><color rgba="0.1 0.1 0.1 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${adapter_z/2}" rpy="0 0 0"/>
+      <geometry><box size="0.042 0.042 ${adapter_z}"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="ft_to_adapter" type="fixed">
+    <parent link="ft_link"/>
+    <origin xyz="0 0 ${ft_z}" rpy="0 0 0"/>
+    <child link="finger_adapter"/>
+  </joint>
+
+  <!-- ====== Finger link ====== -->
+  <link name="finger_link">
+
+    <!-- Inertial properties -->
+    <inertial>
+        <origin xyz="0 0 0.026" rpy="0 0 0"/>   <!-- adjust CoG -->
+        <mass value="0.066"/>                   <!-- kg -->
+        <inertia ixx="70.297" iyy="70.297" izz="70.297" ixy="0" ixz="0" iyz="0"/> <!-- kg mm^2-->
+    </inertial>
+    <!-- Visual mesh from Onshape export -->
+    <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>      <!-- adjust offset/orientation if needed -->
+        <geometry>
+            <mesh filename="package://com_3d/meshes/finger_visual.stl" scale="1 1 1"/>
+        </geometry>
+        <material name="Blue">
+            <color rgba="0.1 0.2 0.8 1.0"/>
+        </material>
+    </visual>
+    <!-- Optional simplified collision geometry -->
+    <collision>
+        <origin xyz="0 0 0.05" rpy="0 0 0"/>   <!-- match your finger shape -->
+        <geometry>
+            <box size="0.02 0.02 0.10"/>         <!-- simpler shape for faster collision checking -->
+        </geometry>
+    </collision>
+  </link>
+
+  <joint name="adapter_to_finger" type="fixed">
+    <parent link="finger_adapter"/>
+    <origin xyz="0 0 ${adapter_z}" rpy="0 0 0"/> <!-- adjust as needed -->
+    <child link="finger_link"/>
+  </joint>
+
+  <!-- ====== Convenience EE frames ====== -->
+  <!-- tool0 at end of adapter (beginning of finger) -->
+  <!-- <link name="tool0"/>
+  <joint name="finger_adapter_to_tool0" type="fixed">
+    <parent link="finger_adapter"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <child link="tool0"/>
+  </joint> -->
+
+  <!-- finger_tip at the very end of the finger -->
+  <link name="finger_tip"/>
+  <joint name="finger_to_tip" type="fixed">
+    <parent link="finger_link"/>
+    <origin xyz="0 0 ${finger_z}" rpy="0 0 0"/>
+    <child link="finger_tip"/>
+  </joint>
+
+</robot>

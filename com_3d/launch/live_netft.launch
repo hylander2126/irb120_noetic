@@ -1,0 +1,36 @@
+<launch>
+
+<!-- ################################################### -->
+<!-- This launch should start the netft node and then plot the force
+    via an rqt_plot which listens on the /netft_data topic -->
+
+<!-- Optionally, transform the /netft_data topic and publish at
+    /netft_data_transformed -->
+<!-- ################################################### -->
+
+    <arg name="apply_transform" default="true"/>
+    <arg name="apply_bias" default="true"/>
+    <arg name="live_rqt" default="true"/>
+
+<!-- Run netft_utils using correct ip address for sensor -->
+    <node pkg="netft_utils" type="netft_node" name="netft_node" output="screen"
+        args="--address 192.168.126.125"/>
+
+<!-- Transform the /netft_data topic and publish at /netft_data_transformed -->
+    <node if="$(arg apply_transform)" pkg="com_3d" type="transform_netft.py" name="transform_netft" output="screen">
+        <param name="input_topic" value="/netft_data"/>
+        <param name="output_topic" value="/netft_data_transformed"/>
+        <param name="apply_bias" value="$(arg apply_bias)"/>
+    </node>
+
+<!-- Based on IF apply_transform, plot either raw or transformed data -->
+
+    <node if="$(eval arg('live_rqt') and arg('apply_transform'))"
+        pkg="rqt_plot" type="rqt_plot" name="rqt_plot_transformed" output="screen"
+        args="/netft_data_transformed/wrench/force"/>
+
+    <node unless="$(eval arg('live_rqt') and arg('apply_transform'))"
+        pkg="rqt_plot" type="rqt_plot" name="rqt_plot_original" output="screen"
+        args="/netft_data/wrench/force"/>
+    
+</launch>
