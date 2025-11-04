@@ -68,17 +68,13 @@
   </include>
 
   <!-- EE pose Logger -->
-  <node pkg="com_3d" type="ee_pose_logger.py" name="ee_pose_logger" output="screen">
+  <!-- <node pkg="com_3d" type="ee_pose_logger.py" name="ee_pose_logger" output="screen">
     <param name="run_base" value="$(arg run_base)"/>
-  </node>
+  </node> -->
 
   <!-- ############################### -->
   <!-- ##### NETFT Sensor Config ##### -->
   <!-- ############################### -->
-
-  <!-- Run netft_utils using correct ip address for sensor -->
-  <!-- <node pkg="netft_utils" type="netft_node" name="netft_node" output="screen"
-          args="dashdshaddress 192.168.126.125"/> -->
 
   <include file="$(find com_3d)/launch/live_netft.launch">
       <arg name="apply_transform" value="true"/>
@@ -86,10 +82,10 @@
     </include>
 
   <!-- Launch the logger and save to CSV-->
-  <node pkg="com_3d" type="netft_logger.py" name="netft_logger" output="screen">
+  <!-- <node pkg="com_3d" type="netft_logger.py" name="netft_logger" output="screen">
     <param name="run_base" value="$(arg run_base)"/>
     <param name="ft_topic" value="/netft_data_transformed"/>
-  </node>
+  </node> -->
 
   <!-- ############################### -->
   <!-- ### Video & AprilTag Config ### -->
@@ -102,7 +98,7 @@
     <param name="image_height" value="1080"/>
     <param name="pixel_format" value="mjpeg"/>
     <param name="io_method" value="mmap"/>
-    <param name="frame_rate" value="30"/>
+    <param name="frame_rate" value="60"/> <!-- This was 30 fps previously and worked -->
 
     <!-- Point to calibration file produced by camera_calibration -->
     <param name="camera_info_url" value="file:///home/airlab07/irb_ws/src/irb120_noetic/com_3d/config/usb_cam_calibration.yaml"/>
@@ -119,13 +115,12 @@
   </node>
 
   <!-- Logger: starts video+CSV when a trajectory goal is published -->
-  <node pkg="com_3d" type="apriltag_logger.py" name="apriltag_logger" output="screen">
+  <!-- <node pkg="com_3d" type="apriltag_logger.py" name="apriltag_logger" output="screen">
     <param name="run_base" value="$(arg run_base)"/>
     <param name="detector_ns" value="$(arg tag_ns)"/>
     <param name="dets_topic_name" value="tag_detections"/>
     <param name="image_topic" value="/tag_detections_image"/>
-    <!-- image_topic used to be "/usb_cam/image_raw" but I prefer seeing the tag detection in the recording -->
-  </node>
+  </node> -->
 
   <!-- Visualize using rqt_image_viewer -->
   <node pkg="rqt_image_view" type="rqt_image_view" name="view_tag_overlay" output="screen"
@@ -135,5 +130,21 @@
 
   <!-- Shutdown Handler (cleanup on exit) -->
   <node pkg="com_3d" type="shutdown_handler.py" name="shutdown_handler" output="screen"/>
+
+
+  <!-- LAUNCH ALL LOGGERS -->
+  <node pkg="com_3d" type="sync_logger.py" name="sync_logger" output="screen">
+    <param name="run_base" value="$(arg run_base)"/>
+    <param name="base_frame" value="base_link"/>
+    <param name="ee_frame"   value="finger_tip"/>
+    <param name="ft_topic"   value="/netft_data_transformed"/>
+    <param name="dets_topic_name" value="tag_detections"/>
+    <param name="tag_max_age" value="0.10"/>
+
+    <!-- video/overlay config -->
+    <param name="image_topic"   value="/tag_detections_image"/> <!-- overlay from apriltag_ros -->
+    <param name="fps_hint"      value="60"/>
+    <param name="warmup_frames" value="10"/>
+  </node>
 
 </launch>

@@ -162,6 +162,7 @@ catkin_install_python(PROGRAMS
   scripts/shutdown_handler.py
   scripts/transform_netft.py
   scripts/ee_pose_logger.py
+  scripts/sync_logger.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
