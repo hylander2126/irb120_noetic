@@ -142,7 +142,7 @@
     <param name="tag_max_age" value="0.10"/>
 
     <!-- video/overlay config -->
-    <param name="image_topic"   value="/tag_detections_image"/> <!-- overlay from apriltag_ros -->
+    <param name="image_topic"   value="/tag_detections_image"/>
     <param name="fps_hint"      value="60"/>
     <param name="warmup_frames" value="10"/>
   </node>

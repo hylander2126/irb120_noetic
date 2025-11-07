@@ -14,6 +14,13 @@ FPS_HINT_DEFAULT = 30
 FOURCC = cv2.VideoWriter_fourcc(*'mp4v')
 
 class FTClockLogger:
+    """
+    This node logs synchronized force-torque (FT), EE pose, and AprilTag detection data
+    to a CSV file, triggered by FT ssampling clock (~ 500 Hz). Also record video
+    overlays of the detections to an MP4 file.
+
+    IT CURRENTLY USES THE HIGHEST_FREQUENCY DATASTREAM AS THE CLOCK (FT SENSOR)
+    """
     def __init__(self):
         self.run_base   = rospy.get_param('~run_base')
         self.base_frame = rospy.get_param('~base_frame', 'base_link')
@@ -43,13 +50,30 @@ class FTClockLogger:
         self.video_path = None
 
         # latest tag (sample-and-hold; no interp)
-        self.tag_latest = None  # dict: t, id, rpy, txyz, qxyzw
-
+        self.tag_latest = {'t': None, 'id': None,
+                               'rpy': (None, None, None),
+                               'txyz': (None, None, None)}
+        
         # TF buffer (TF handles any needed interp internally)
         self.tfbuf = tf2_ros.Buffer(cache_time=rospy.Duration(30.0))
         self.tfl   = tf2_ros.TransformListener(self.tfbuf)
         self.tf_timeout_sec = float(rospy.get_param('~tf_timeout_sec', 0.03)) # 30 ms
-        self.ee_last = None
+        # best-effort prime of ee_last using latest TF, so first row isn't NaN
+        try:
+            ts = self.tfbuf.lookup_transform(self.base_frame, self.ee_frame,
+                                            rospy.Time(0), rospy.Duration(0.03))
+            self.ee_last = [
+                ts.transform.translation.x,
+                ts.transform.translation.y,
+                ts.transform.translation.z,
+                ts.transform.rotation.x,
+                ts.transform.rotation.y,
+                ts.transform.rotation.z,
+                ts.transform.rotation.w,
+            ]
+        except Exception:
+            # leave ee_last as None; we'll fall back to identity in _on_ft
+            pass
         
 
         rospy.Subscriber(self.tag_topic, AprilTagDetectionArray, self._on_tag, queue_size=50)
@@ -75,8 +99,7 @@ class FTClockLogger:
                 'ee_x','ee_y','ee_z','ee_qx','ee_qy','ee_qz','ee_qw',
                 'tag_visible','tag_id',
                 'tag_roll(rad)','tag_pitch(rad)','tag_yaw(rad)',
-                'tag_tx(m)','tag_ty(m)','tag_tz(m)',
-                'tag_qx','tag_qy','tag_qz','tag_qw'
+                'tag_tx(m)','tag_ty(m)','tag_tz(m)'
             ])
             self.recording = True
             self.last_flush = rospy.Time.now().to_sec()
@@ -124,59 +147,7 @@ class FTClockLogger:
         with self.lock:
             self.tag_latest = {'t': t, 'id': int(tag_id),
                                'rpy': (roll, pitch, yaw),
-                               'txyz': (tx, ty, tz),
-                               'qxyzw': tuple(q)}
-
-        # only write when armed
-        with self.lock:
-            if not self.recording or self.csv_w is None:
-                return
-
-       # FT at tag time: sample-and-hold (use the most recent FT sample seen)
-        with self.lock:
-            ft = self.ft_latest
-        if ft is None:
-            return  # no FT seen yet; skip this row until first FT arrives
-
-        # EE pose at tag time; on failure, hold last good
-        ee = [float('nan')]*7
-        try:
-            ts: TransformStamped = self.tfbuf.lookup_transform(
-                self.base_frame, self.ee_frame,
-                rospy.Time.from_sec(t), rospy.Duration(self.tf_timeout_sec)
-            )
-            ee = [
-                ts.transform.translation.x,
-                ts.transform.translation.y,
-                ts.transform.translation.z,
-                ts.transform.rotation.x,
-                ts.transform.rotation.y,
-                ts.transform.rotation.z,
-                ts.transform.rotation.w,
-            ]
-            self.ee_last = ee[:]
-        except Exception:
-            if self.ee_last is not None:
-                ee = self.ee_last[:]
-
-        # Write row (tag_visible=1 because we write only when a tag exists)
-        with self.lock:
-            if not self.recording or self.csv_w is None:
-                return
-            self.csv_w.writerow([
-                f"{t:.6f}",
-                f"{ft[1]:.9f}",  f"{ft[2]:.9f}",  f"{ft[3]:.9f}",
-                f"{ft[4]:.9f}",  f"{ft[5]:.9f}",  f"{ft[6]:.9f}",
-                f"{ee[0]:.9f}", f"{ee[1]:.9f}", f"{ee[2]:.9f}",
-                f"{ee[3]:.9f}", f"{ee[4]:.9f}", f"{ee[5]:.9f}", f"{ee[6]:.9f}",
-                1, int(tag_id),
-                f"{roll:.9f}", f"{pitch:.9f}", f"{yaw:.9f}",
-                f"{tx:.9f}",   f"{ty:.9f}",    f"{tz:.9f}",
-                f"{q[0]:.9f}", f"{q[1]:.9f}",  f"{q[2]:.9f}", f"{q[3]:.9f}",
-            ])
-            now = rospy.Time.now().to_sec()
-            if (now - self.last_flush) >= self.flush_period:
-                self.csv_f.flush(); self.last_flush = now
+                               'txyz': (tx, ty, tz)}
 
     def _on_image(self, msg: Image):
         # Write overlay frames to MP4 after a short warmup
@@ -207,13 +178,69 @@ class FTClockLogger:
 
 
     def _on_ft(self, msg: WrenchStamped):
+        """
+        FT Callback: capture the current FT and retrieve the latest tag info. 
+        This uses the FT sensor as the clock for synchronization.
+        """
         t = msg.header.stamp.to_sec() if msg.header.stamp else rospy.Time.now().to_sec()
-        sample = (t,
-                float(msg.wrench.force.x),  float(msg.wrench.force.y),  float(msg.wrench.force.z),
-                float(msg.wrench.torque.x), float(msg.wrench.torque.y), float(msg.wrench.torque.z))
-        # store atomically
+        ft = (float(msg.wrench.force.x),  float(msg.wrench.force.y),  float(msg.wrench.force.z),
+              float(msg.wrench.torque.x), float(msg.wrench.torque.y), float(msg.wrench.torque.z))
+
+        # FT at tag time: sample-and-hold (use the most recent FT sample seen)
+        if ft is None:
+            return  # no FT seen yet; skip this row until first FT arrives
+        
+
+        ## Retrieve the latest tag info
         with self.lock:
-            self.ft_latest = sample
+            tag = self.tag_latest
+
+        # only write when armed
+        with self.lock:
+            if not self.recording or self.csv_w is None:
+                return
+
+        # EE pose at tag time; on failure, hold last good
+        ee = [float('nan')]*7
+        try:
+            ts: TransformStamped = self.tfbuf.lookup_transform(
+                self.base_frame, self.ee_frame,
+                rospy.Time.from_sec(t), rospy.Duration(self.tf_timeout_sec)
+            )
+            ee = [
+                ts.transform.translation.x,
+                ts.transform.translation.y,
+                ts.transform.translation.z,
+                ts.transform.rotation.x,
+                ts.transform.rotation.y,
+                ts.transform.rotation.z,
+                ts.transform.rotation.w,
+            ]
+            self.ee_last = ee[:]
+        except Exception:
+            if self.ee_last is not None:
+                ee = self.ee_last[:]
+
+
+        # Write row (tag_visible=1 because we write only when a tag exists)
+        with self.lock:
+            if not self.recording or self.csv_w is None:
+                return
+            self.csv_w.writerow([
+                f"{t:.6f}",
+                f"{ft[0]:.9f}",  f"{ft[1]:.9f}",  f"{ft[2]:.9f}",
+                f"{ft[3]:.9f}",  f"{ft[4]:.9f}",  f"{ft[5]:.9f}",
+                f"{ee[0]:.9f}", f"{ee[1]:.9f}", f"{ee[2]:.9f}",
+                f"{ee[3]:.9f}", f"{ee[4]:.9f}", f"{ee[5]:.9f}", f"{ee[6]:.9f}",
+                1, int(tag['id']),
+                f"{tag['rpy'][0]:.9f}", f"{tag['rpy'][1]:.9f}", f"{tag['rpy'][2]:.9f}",
+                f"{tag['txyz'][0]:.9f}",   f"{tag['txyz'][1]:.9f}",    f"{tag['txyz'][2]:.9f}",
+            ])
+            now = rospy.Time.now().to_sec()
+            if (now - self.last_flush) >= self.flush_period:
+                self.csv_f.flush(); self.last_flush = now
+
+        
 
 
 if __name__ == '__main__':
