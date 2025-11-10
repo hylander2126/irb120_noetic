@@ -163,6 +163,8 @@ catkin_install_python(PROGRAMS
   scripts/transform_netft.py
   scripts/sync_logger.py
   scripts/go_forward.py
+  scripts/go_home.py
+  scripts/go_prep.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

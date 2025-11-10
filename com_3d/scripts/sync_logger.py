@@ -72,7 +72,8 @@ class FTClockLogger:
                 ts.transform.rotation.w,
             ]
         except Exception:
-            # leave ee_last as None; we'll fall back to identity in _on_ft
+            # leave ee_last as zeros
+            self.ee_last = [0, 0, 0, 0, 0, 0, 0]
             pass
         
 

@@ -2,12 +2,11 @@ import moveit_commander
 from moveit_commander import roscpp_initialize
 import geometry_msgs.msg
 from std_msgs.msg import Empty
-from std_srvs.srv import Trigger, TriggerRequest, TriggerResponse
 from abb_robot_msgs.srv import TriggerWithResultCode
-from control_msgs.msg import FollowJointTrajectoryActionGoal
 import rospy
 import copy
 import math
+import numpy as np
 
 MOVE_GROUP_NAME = "manipulator"
 # EGM_GOAL_TOPIC = "/egm/goal"
@@ -19,9 +18,6 @@ JOINT_NAMES = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
 def _start_egm():
     rospy.wait_for_service(EGM_START_SRV)
     try:
-        # Call empty service without importing custom stubs
-        # rospy.ServiceProxy(EGM_START_SRV, type('EmptySrv', (), {'_request_class': type('R', (), {})}))({})
-        # resp = rospy.ServiceProxy(EGM_START_SRV, Trigger)(TriggerRequest())
         rospy.ServiceProxy(EGM_START_SRV, TriggerWithResultCode)(TriggerWithResultCode._request_class())
     except Exception as e:
         rospy.logwarn(f"start_egm call failed: {e}")
@@ -29,8 +25,6 @@ def _start_egm():
 def _stop_egm():
     rospy.wait_for_service(EGM_STOP_SRV)
     try:
-        # rospy.ServiceProxy(EGM_STOP_SRV, type('EmptySrv', (), {'_request_class': type('R', (), {})}))({})
-        # resp = rospy.ServiceProxy(EGM_STOP_SRV, Trigger)(TriggerRequest())
         rospy.ServiceProxy(EGM_STOP_SRV, TriggerWithResultCode)(TriggerWithResultCode._request_class())
     except Exception as e:
         rospy.logwarn(f"stop_egm call failed: {e}")
@@ -44,25 +38,24 @@ def _disarm_logs():
     rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
 
 
-def _plan_cartesian_path(group: moveit_commander.MoveGroupCommander, start_pose, xyz_waypoints, eef_step=0.004):
+def _plan_cartesian_path(group: moveit_commander.MoveGroupCommander, start_pose, xyz_waypoints, q_desired, eef_step=0.004):
     
     """
-    Build poses at given [[x,y,z]] waypoints while LOCKING the starting orientation.
+    Build poses at given [[x,y,z]] waypoints while giving the option to LOCK the starting orientation.
     Returns (traj, path_len(m), fraction)
     """
-    qx, qy, qz, qw = (start_pose.orientation.x, start_pose.orientation.y,
-                      start_pose.orientation.z, start_pose.orientation.w)
-    
+    qx, qy, qz, qw = q_desired
+
     waypoints = []
     for x, y, z in xyz_waypoints:
         p = geometry_msgs.msg.Pose()
         p.position.x = x
         p.position.y = y
         p.position.z = z
-        p.orientation.x = qx #0.0 #qx
-        p.orientation.y = qy #0.0 #qy
-        p.orientation.z = qz #0.0 #qz
-        p.orientation.w = qw #1.0 #qw
+        p.orientation.x = qx
+        p.orientation.y = qy
+        p.orientation.z = qz
+        p.orientation.w = qw
         waypoints.append(copy.deepcopy(p))
 
     # Estimate geometric path length (sum of straight segments)
@@ -79,10 +72,9 @@ def _plan_cartesian_path(group: moveit_commander.MoveGroupCommander, start_pose,
     return plan, path_len, fraction
 
 
-def execute_motion(pos_desired, cart_speed=0.05, eef_step=0.004, arm_logging=True):
+def execute_motion(pos_desired, q_desired=np.zeros(4), cart_speed=0.03, eef_step=0.004, arm_logging=False):
     """
-    Execute a Cartesian motion through given WORLD-FRAME [x,y,z] waypoint(s), locking
-    the EE orientation from start pose.
+    Execute a Cartesian motion through given WORLD-FRAME [x,y,z] waypoint(s).
 
     pos_desired: list of [x,y,z] waypoints in meters
     cart_speed: desired Cartesian speed in m/s (approximate)
@@ -94,12 +86,9 @@ def execute_motion(pos_desired, cart_speed=0.05, eef_step=0.004, arm_logging=Tru
     robot = moveit_commander.RobotCommander()
     group = moveit_commander.MoveGroupCommander(MOVE_GROUP_NAME)
 
-    # GET STATE ONCE and use it for everything
     group.set_start_state_to_current_state()
     current_pose = group.get_current_pose().pose
-    
-    # pos_desired = [current_pos_list]
-    # pos_desired[0][0] += 0.1  # move forward
+
 
     # Get basic information
     print(f"========== Reference frame: {group.get_planning_frame()} ==========")
@@ -110,8 +99,18 @@ def execute_motion(pos_desired, cart_speed=0.05, eef_step=0.004, arm_logging=Tru
     # Get list of all groups in the robot
     print(f"========== Robot Groups: {robot.get_group_names()} ==========")
 
+    print(f"\nExecuting Cartesian motion to waypoints: {pos_desired[:]}")
+
     ## Plan a joint goal based on the desired end x,y,z position
-    plan, path_len, fraction = _plan_cartesian_path(group, current_pose, pos_desired, eef_step=eef_step)
+    if np.allclose(q_desired, np.zeros(4)):
+        rospy.loginfo("Planning Cartesian path with HOLD ORIENTATION...")
+        q_desired = [current_pose.orientation.x, current_pose.orientation.y,
+                     current_pose.orientation.z, current_pose.orientation.w]
+    else:
+        rospy.loginfo(f"Planning Cartesian path with ORIENTATION: {q_desired}...")
+        q_desired = q_desired
+
+    plan, path_len, fraction = _plan_cartesian_path(group, current_pose, pos_desired, q_desired, eef_step=eef_step)
     if fraction < 0.99:
         rospy.logwarn(f"WARNING: Only {fraction*100:.1f}% of Cartesian path could be planned.")
         return False
@@ -119,8 +118,9 @@ def execute_motion(pos_desired, cart_speed=0.05, eef_step=0.004, arm_logging=Tru
     ## Re-time traj to be slow
     rospy.loginfo("Re-timing trajectory...")
     slow_plan = group.retime_trajectory(robot.get_current_state(), plan,
-                                       velocity_scaling_factor=0.05,
-                                       acceleration_scaling_factor=0.05)
+                                       velocity_scaling_factor=cart_speed,
+                                       acceleration_scaling_factor=cart_speed)
+    
 
     # ARM THE TAG, FT, and EE POSE LOGGING
     if arm_logging:
@@ -141,3 +141,12 @@ def execute_motion(pos_desired, cart_speed=0.05, eef_step=0.004, arm_logging=Tru
         _disarm_logs()
 
     return ok
+
+
+def print_current_pose(robot, group):
+    current_pose = group.get_current_pose().pose
+    rospy.loginfo(f"Current EE pose: \npos[{current_pose.position.x:.3f},{current_pose.position.y:.3f}, {current_pose.position.z:.3f}], "
+                  f"\norient[{current_pose.orientation.x:.3f}, "
+                  f"{current_pose.orientation.y:.3f}, "
+                  f"{current_pose.orientation.z:.3f}, "
+                  f"{current_pose.orientation.w:.3f}]")
