@@ -165,6 +165,7 @@ catkin_install_python(PROGRAMS
   scripts/go_forward.py
   scripts/go_home.py
   scripts/go_prep.py
+  scripts/move.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -98,7 +98,7 @@
     <param name="image_height" value="1080"/>
     <param name="pixel_format" value="mjpeg"/>
     <param name="io_method" value="mmap"/>
-    <param name="frame_rate" value="60"/> <!-- This was 30 fps previously and worked -->
+    <param name="frame_rate" value="30"/> <!-- This was 30 fps previously and worked -->
 
     <!-- Point to calibration file produced by camera_calibration -->
     <param name="camera_info_url" value="file:///home/airlab07/irb_ws/src/irb120_noetic/com_3d/config/usb_cam_calibration.yaml"/>
@@ -143,7 +143,7 @@
 
     <!-- video/overlay config -->
     <param name="image_topic"   value="/tag_detections_image"/>
-    <param name="fps_hint"      value="60"/>
+    <param name="fps_hint"      value="30"/>
     <param name="warmup_frames" value="10"/>
   </node>
 
