@@ -252,3 +252,54 @@ def execute_motion(
         return True
 
     return bool(ok)
+
+
+def move_joints_simple(q_goal, duration=3.0, goal_time_tolerance=2.0):
+    from sensor_msgs.msg import JointState
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from control_msgs.msg import FollowJointTrajectoryActionGoal
+
+    # ------------ Simple joint-space motion via EGM FollowJointTrajectory ------------
+    JOINT_CMD_TOPIC   = "/egm/joint_trajectory_controller/follow_joint_trajectory/goal"
+    JOINT_STATE_TOPIC = "/joint_states"  # usually correct; change if needed
+    JOINT_NAMES = [
+        "joint_1", "joint_2", "joint_3",
+        "joint_4", "joint_5", "joint_6",
+    ]
+
+    # Start EGM if not already started
+    _start_egm()
+    rospy.sleep(0.2)
+
+    pub = rospy.Publisher(JOINT_CMD_TOPIC, FollowJointTrajectoryActionGoal, queue_size=1)
+    rospy.sleep(0.5)  # wait for publisher to register
+
+    # Build action goal message
+    goal_msg = FollowJointTrajectoryActionGoal()
+    traj_goal = goal_msg.goal
+    traj_goal.trajectory = JointTrajectory()
+    traj_goal.trajectory.joint_names = JOINT_NAMES
+
+    pt = JointTrajectoryPoint()
+    pt.positions = q_goal
+    pt.time_from_start = rospy.Duration(duration)
+
+    traj_goal.trajectory.points = [pt]
+    traj_goal.goal_time_tolerance = rospy.Duration(goal_time_tolerance)
+
+    rospy.loginfo(
+        f"[move_joints_simple] Publishing FollowJointTrajectoryActionGoal to {JOINT_CMD_TOPIC}\n"
+        f"  joints: {JOINT_NAMES}\n"
+        f"  q_goal: {q_goal}\n"
+        f"  duration: {duration}s"
+    )
+
+    pub.publish(goal_msg)
+
+    # Naive wait for motion to complete
+    rospy.sleep(duration + 3.0)
+
+    # Stop EGM
+    _stop_egm()
+
+    return True

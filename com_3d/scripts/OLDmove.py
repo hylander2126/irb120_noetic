@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import rospy
-from com_3d.linear_move import execute_motion, move_joints_simple
+from com_3d.linear_move import execute_motion, go_to_pose_simple
 
 DEFAULT_Q = [0.000, 0.7313537, 0.000, 0.6819984] # manually determined for better alignment for now
 HOME_GOAL_XYZ = [0.373, 0.000, 0.626]
@@ -14,46 +14,42 @@ Z_OFFSET = 0.035  # mounting base height
 
 OBJECT_MOTIONS = {
     "box": {
-        # "prep": [0.440, 0.000, 0.25-Z_OFFSET],  # z=0.25 in z IN WORLD
+        "prep": [0.440, 0.000, 0.25-Z_OFFSET],  # z=0.25 in z IN WORLD
         "push": [0.600, 0.000, 0.25-Z_OFFSET],  # move forward along x by ~15 cm
-        # "quat": [0.003, 0.717, 0.001, 0.697],
-        "prep_q": [-0.004, 0.558, 0.898, -0.008, -1.404, 0.001] # manual prep joint config
+        "quat": [0.003, 0.717, 0.001, 0.697]
     },
     
     "heart":{
-        # "prep": [0.440, 0.000, 0.25-Z_OFFSET],  # z=0.25 in z IN WORLD
+        "prep": [0.440, 0.000, 0.25-Z_OFFSET],  # z=0.25 in z IN WORLD
         "push": [0.600, 0.000, 0.25-Z_OFFSET],  # move forward along x by ~15 cm
-        # "quat": [0.003, 0.717, 0.001, 0.697], # TODO: update this one
-        "prep_q": [-0.004, 1.154, 1.289, -0.013, -1.698, -1.57] # manual prep joint config
+        "quat": [0.003, 0.717, 0.001, 0.697] # TODO: update this one
     },
 
     "lshape": {
-        # "prep": [0.440, 0.000, 0.13-Z_OFFSET],  # z=0.13 in z IN WORLD
+        "prep": [0.440, 0.000, 0.13-Z_OFFSET],  # z=0.13 in z IN WORLD
         "push": [0.600, 0.000, 0.13-Z_OFFSET],  # move forward along x by ~15 cm
-        # "quat": [-0.001, 0.703, 0.005, 0.711], # TODO : update this one
-        "prep_q": [-0.004, 1.154, 0.437, -0.008, -1.566, 0.001] # manual prep joint config
+        "quat": [-0.001, 0.703, 0.005, 0.711] # TODO : update this one
     },
 
     "monitor": {
-        # "prep": [0.440, 0.000, 0.50-Z_OFFSET],  # z=0.5 in z IN WORLD
+        "prep": [0.440, 0.000, 0.50-Z_OFFSET],  # z=0.5 in z IN WORLD
         "push": [0.600, 0.000, 0.50-Z_OFFSET],  # move forward along x by ~15 cm
-        # "quat": [0.003, 0.717, 0.001, 0.697], # TODO : update this one
-        # "prep_q": [-0.004, 1.154, 0.437, -0.008, -1.566, 0.001] # manual prep joint config
+        "quat": [0.003, 0.717, 0.001, 0.697] # TODO : update this one
     },
 
     "flashlight": {
-        # "prep": [0.440, 0.000, 0.25-Z_OFFSET],  # z=0.25 in z IN WORLD
+        "prep": [0.440, 0.000, 0.25-Z_OFFSET],  # z=0.25 in z IN WORLD
         "push": [0.600, 0.000, 0.25-Z_OFFSET],  # move forward along x by ~15 cm
-        # "quat": [0.003, 0.717, 0.001, 0.697], # TODO : update this one
-        "prep_q": [-0.004, 0.967, 0.556, -0.008, -1.479, 0.001] # manual prep joint config
+        "quat": [0.003, 0.717, 0.001, 0.697] # TODO : update this one
     }
 }
 
-# EXTREMELY ANNOYING... MOVEIT SUCKS SO HARD. SO I AM GOING TO USE IT ONLY TO MOVE LINEARLY
-# FOR RETURNING TO PREPUSH, I AM GOING TO DIRECTLY COMMAND THE JOINT CONFIGS
+# PREP_GOAL_XYZ = [0.440, 0.000, 0.215] # z=0.25 in z IN WORLD
 
-from sensor_msgs.msg import JointState
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+# PUSH_GOAL_XYZ = [0.600, 0.000, 0.215]  # move forward along x by ~15 cm
+
+# TF ORI CORRECT = [0.003, 0.717, 0.001, 0.697]
+# MUST COMMAND   = [0, 0.7253744, 0, 0.6883546]
 
 def get_object_name():
     """
@@ -70,10 +66,9 @@ def main():
         rospy.logerr(f"[go_forward] Object '{object_name}' not recognized. Set _object_name:= to one of: {list(OBJECT_MOTIONS.keys())}")
         return
 
-    # prep_xyz = OBJECT_MOTIONS[object_name]["prep"]
+    prep_xyz = OBJECT_MOTIONS[object_name]["prep"]
     push_xyz = OBJECT_MOTIONS[object_name]["push"]
-    # orientation = OBJECT_MOTIONS[object_name]["quat"]
-    joint_pos = OBJECT_MOTIONS[object_name]["prep_q"]
+    orientation = OBJECT_MOTIONS[object_name]["quat"]
 
     rospy.loginfo(f"[go_forward] Preparing to push object '{object_name}'.")
 
@@ -88,8 +83,10 @@ def main():
     #     arm_logging=False
     # )
 
-    success_prep = move_joints_simple(
-        joint_pos, # duration=3.0, goal_tol=2.0
+    success_prep = go_to_pose_simple(
+        prep_xyz,
+        # orientation,
+        cart_speed=0.03
     )
 
     if not success_prep:
