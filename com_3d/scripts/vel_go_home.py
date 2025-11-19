@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import rospy
-import numpy as np
-from com_3d.velocity_controller import VelocityCommander
+from com_3d.vel_controller import VelocityController
 
 # RETRIEVED BY JOGGING ROBOT TO *EXACTLY* ALL ZERO JOINTS
 HOME_XYZ = [0.374000, 0.000000, 0.630000] # TOOL FLANGE IN ROBOT FRAME (from robot, not TF) (technically 374.01, 0.01, 629.99 mm)
@@ -17,17 +16,12 @@ X_OFFSET_FINGER = 0.08225+ 0.11 # X readings are ~192.25 mm 'less' than expected
 def main():
     rospy.init_node("go_home")
 
-    commander = VelocityCommander()
+    temp = VelocityController(max_joint_vel=1.0)
 
     rospy.loginfo("[go_home] Moving robot to home position using velocity control...")
-    # motion_success = commander.go_home_velocity(timeout=20.0)
-    # motion_success = commander.go_to_joint_target([0, 0.615, 0.867, 0, -1.482, 0], timeout=20.0) # we know this is prepush pose for "box"
-
-    motion_success = commander.move_cartesian_velocity(
-        [0, 0.1, 0],
-        [0, 0, 0],
-        duration=1,
-    )
+    # motion_success = temp.cartesian_velocity(v=[0.01, 0, 0], w=[0, 0, 0], duration=2.0)
+    motion_success = temp.move_to_joint_positions([0, 0, 0, 0, 0, 0])
+    # motion_success = temp.move_to_joint_positions([0, 0.615, 0.867, 0, -1.482, 0], timeout=20.0) # we know this is prepush pose for "box"
     
     if not motion_success:
         rospy.logerr("[go_home] Home motion failed!")

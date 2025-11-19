@@ -20,24 +20,15 @@ import numpy as np
 '''
 *** HYLAND ADDED FUNCTIONS ***
 '''
-
-def manipulability(J):
-    """Computes the Yoshikawa manipulability measure."""
-    JJt = J @ J.T
-
-    # Numerical safety: determinant can be slightly negative due to numerical errors
-    det_val = np.linalg.det(JJt)
-    det_val = max(det_val, 0)
-    return float(np.sqrt(det_val))
-
-
-def damped_pinv(J, lam):
-    """
-    Damped least-squares pseudoinverse:
-    J^T (J J^T + lambda^2 I)^{-1}
-    """
-    JJt = J @ J.T
-    return J.T @ np.linalg.inv(JJt + (lam ** 2) * np.eye(J.shape[0]))
+def screw_to_se3(S):
+        """Converts a 6-vector screw S=[v, w] to its 4x4 matrix representation [S]."""
+        w = S[3:]
+        v = S[:3]
+        w_skew = VecToso3(w)
+        return np.block([
+            [w_skew, v.reshape(3, 1)],
+            [np.zeros((1, 4))]
+        ])
 
 # ---------- Rotation: vectorized Rodrigues (returns (n,3,3)) ----------
 def axisangle2rot_vec(axis: np.ndarray, theta: np.ndarray) -> np.ndarray:

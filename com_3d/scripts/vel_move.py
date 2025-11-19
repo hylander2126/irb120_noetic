@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import rospy
-from com_3d.linear_move import execute_motion, move_joints_simple
+from com_3d.vel_controller import VelocityController
 import numpy as np
 
 # RETRIEVED BY JOGGING ROBOT TO *EXACTLY* ALL ZERO JOINTS
@@ -57,12 +57,6 @@ OBJECT_MOTIONS = {
     }
 }
 
-# EXTREMELY ANNOYING... MOVEIT SUCKS SO HARD. SO I AM GOING TO USE IT ONLY TO MOVE LINEARLY
-# FOR RETURNING TO PREPUSH, I AM GOING TO DIRECTLY COMMAND THE JOINT CONFIGS
-
-from sensor_msgs.msg import JointState
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
 def get_object_name():
     """
     Get the object name from ROS parameter server or use default.
@@ -78,6 +72,8 @@ def main():
         rospy.logerr(f"[go_forward] Object '{object_name}' not recognized. Set _object:= to one of: {list(OBJECT_MOTIONS.keys())}")
         return
 
+    ctrl = VelocityController(max_joint_vel=1.0)
+
     prep_xyz = OBJECT_MOTIONS[object_name]["prep"]
     push_xyz = OBJECT_MOTIONS[object_name]["push"]
     # orientation = OBJECT_MOTIONS[object_name]["quat"]
@@ -87,17 +83,13 @@ def main():
 
     
     # 1) Move to pre-push pose
-    # success_prep = execute_motion(
-    #     prep_xyz,
-    #     cart_speed=0.03,
-    #     force_stop=False,
-    #     q_desired=HOME_QUAT,
-    #     ft_topic="netft_data_transformed",
-    #     arm_logging=False
+    # success_prep = ctrl.move_to_joint_positions(
+    #     joint_pos, timeout=10.0
     # )
-
-    success_prep = move_joints_simple(
-        joint_pos, duration=4.0, goal_time_tolerance=2.0
+    success_prep = ctrl.cartesian_velocity(
+        v=[0, 0, -0.01], # XYZ
+        w=[0, 0, 0],   # RPY
+        duration=2.0
     )
 
     if not success_prep:
@@ -107,40 +99,40 @@ def main():
         rospy.loginfo("[go_forward] Pre-push pose reached.")
 
     
-    # 2) Execute push motion
-    push_success = execute_motion(
-        push_xyz,
-        cart_speed=0.015,
-        k_safe=0.25,                # stop when force <= 60% of peak
-        ft_topic="netft_data_transformed",    # change to your topic
-        contact_thresh=0.4, # Should be higher than sensor noise (when not in contact)
-        arm_logging=True
-    )
-
-    if not push_success:
-        rospy.logerr("[go_forward] Push motion failed!")
-        return
-    else:
-        rospy.loginfo("[go_forward] succeeded.")
-
-
-    # # 3) Return to pre-push pose
-    # success_return = execute_motion(
-    #     prep_xyz,
-    #     cart_speed=0.03,
-    #     force_stop=False,
-    #     ft_topic="netft_data_transformed",
-    #     arm_logging=False
+    # # 2) Execute push motion
+    # push_success = execute_motion(
+    #     push_xyz,
+    #     cart_speed=0.015,
+    #     k_safe=0.25,                # stop when force <= 60% of peak
+    #     ft_topic="netft_data_transformed",    # change to your topic
+    #     contact_thresh=0.4, # Should be higher than sensor noise (when not in contact)
+    #     arm_logging=True
     # )
 
-    success_return = move_joints_simple(
-        joint_pos, duration=4.0, goal_time_tolerance=2.0
-    )
+    # if not push_success:
+    #     rospy.logerr("[go_forward] Push motion failed!")
+    #     return
+    # else:
+    #     rospy.loginfo("[go_forward] succeeded.")
 
-    if not success_return:
-        rospy.logerr("[go_forward] Return motion failed!")
-    else:
-        rospy.loginfo("[go_forward] Return to initial pose succeeded.")
+
+    # # # 3) Return to pre-push pose
+    # # success_return = execute_motion(
+    # #     prep_xyz,
+    # #     cart_speed=0.03,
+    # #     force_stop=False,
+    # #     ft_topic="netft_data_transformed",
+    # #     arm_logging=False
+    # # )
+
+    # success_return = move_joints_simple(
+    #     joint_pos, duration=4.0, goal_time_tolerance=2.0
+    # )
+
+    # if not success_return:
+    #     rospy.logerr("[go_forward] Return motion failed!")
+    # else:
+    #     rospy.loginfo("[go_forward] Return to initial pose succeeded.")
 
 
 if __name__ == "__main__":

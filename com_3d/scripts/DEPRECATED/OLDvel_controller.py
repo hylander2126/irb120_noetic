@@ -10,7 +10,8 @@ from abb_robot_msgs.srv import TriggerWithResultCode
 import threading
 from numpy.linalg import pinv
 from tf.transformations import quaternion_matrix, euler_from_quaternion, quaternion_from_matrix
-import com_3d.velocity_controller_kinematics as vck
+from com_3d.velocity_controller_kinematics import VelController
+import tf
 
 # Topics and Services
 VEL_CMD_TOPIC = "/egm/joint_group_velocity_controller/command"
@@ -185,21 +186,16 @@ class VelocityCommander:
         # ... (EGM start, timing setup) ...
         
         # Desired end-effector twist (6x1 vector)
-        # Note: Order is [vx, vy, vz, wx, wy, wz] (linear, angular)
-        X_dot_des = np.array(xyz_vel + rpy_vel)
+        # Note: Order is [wx, wy, wz, vx, vy, vz] (angular, linear)
+        X_dot_des = np.array(rpy_vel + xyz_vel).reshape(6,)
 
         _start_egm()
         rospy.sleep(0.5)
-        
-        start_time = rospy.Time.now()
-        success = False
 
-        # PID state initialization
-        integral_error = np.zeros(6)
-        previous_error = np.zeros(6)
-        last_time = start_time.to_sec()
-        
-        rospy.loginfo(f"[CartVel] Moving to cartesian velocity: {X_dot_des}")
+        start_time = rospy.Time.now()
+        rospy.loginfo(f"[CartVel] Received Cart. Vel. (w,v): {X_dot_des}")
+
+        controller = VelController()
         
         while (rospy.Time.now() - start_time).to_sec() < duration and not rospy.is_shutdown():
             with self._state_lock:
@@ -211,18 +207,24 @@ class VelocityCommander:
 
             # 1. Get Jacobian (J) using custom FK/PoE calculation
             # We use the Jacobian in the BASE (Space) Frame: J_s
-            J_s = vck.geometric_jacobian(q_curr)
-
-            rospy.loginfo_throttle(0.5, f"[CartVel] Current Jacobian J_s:\n{np.round(J_s, 3)}")
+            J_s = controller.J_geometric(q_curr)
+            # rospy.loginfo_throttle(0.5, f"[CartVel] Current Jacobian J_s:\n{np.round(J_s, 3)}")
             
             if J_s is None:
                 self.rate.sleep()
                 continue
+
+            # Calculate manipulability index
+            w = controller.manipulability(J_s)
+            if w < 0.02:
+                rospy.logwarn_throttle(0.5, f"Low manipulability detected ({w:.3f}), using damped pseudoinverse.")
+                # NOTE: DLS will automatically handle the singularity
                 
             # 2. Calculate Pseudoinverse (J_s_pinv)
             # Use pinv from numpy.linalg
             try:
-                J_s_pinv = pinv(J_s)
+                # J_s_pinv = pinv(J_s)
+                J_s_pinv = controller.damped_pinv(J_s, lam=0.1)
             except np.linalg.LinAlgError:
                 rospy.logwarn("Singularity detected, skipping control step.")
                 self.rate.sleep()
@@ -232,7 +234,7 @@ class VelocityCommander:
             # q_dot = J_s_dagger * X_dot_des (space frame velocity control)
             q_dot_cmd = J_s_pinv @ X_dot_des
 
-            # rospy.loginfo_throttle(0.5, f"[VelCmd] Commanded joint velocities: {q_dot_cmd}")
+            rospy.loginfo_throttle(0.5, f"[VelCmd] Commanded joint velocities: \n{np.round(q_dot_cmd, 3)}")
 
             q_dot_cmd = np.clip(q_dot_cmd, -self.MAX_VELOCITY, self.MAX_VELOCITY)
             
