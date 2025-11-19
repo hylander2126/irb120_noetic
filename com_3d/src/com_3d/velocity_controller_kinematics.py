@@ -1,96 +1,88 @@
 # velocity_controller_kinematics.py - Custom Kinematics Module
 
 import numpy as np
-import tf.transformations as tft
+from helper_fns import *
 from numpy.linalg import pinv
 from scipy.linalg import expm, logm # You'll need scipy for expm/logm
 
 # --- IRB 120 Kinematic Data (Approximate PoE Parameters based on typical 6R) ---
 
-def skew(w):
-    """Returns the 3x3 skew-symmetric matrix [w] of a 3x1 vector w."""
-    return np.array([
-        [0, -w[2], w[1]],
-        [w[2], 0, -w[0]],
-        [-w[1], w[0], 0]
-    ])
+class Controller:
+    def __init__(self):
+        self.name = "irb120_controller"
+
+        self.q = np.zeros(6)  # Initial joint angles
 
 
-# Six 6-element screw axes (v, w) expressed in the Base Frame at zero position
-# These must be derived from the URDF geometry (joint origins and axes).
-w1 = [0, 0, 1]
-w2 = [0, 1, 0]
-w3 = [0, 1, 0]
-w4 = [1, 0, 0]
-w5 = [0, 1, 0]
-w6 = [1, 0, 0]
-# v = -[w]p
-v1 = np.array([0, 0, 0])
-v2 = -skew(w2) @ np.array([0.000, 0.0, 0.290])  # Example origin
-v3 = -skew(w3) @ np.array([0.000, 0.0, 0.270])
-v4 = -skew(w4) @ np.array([0.000, 0.0, 0.070])
-v5 = -skew(w5) @ np.array([0.302, 0.0, 0.000])
-v6 = -skew(w6) @ np.array([0.072, 0.0, 0.000])
-
-SCREWS = np.array([
-    np.hstack((v1, w1)), np.hstack((v2, w2)), np.hstack((v3, w3)),
-    np.hstack((v4, w4)), np.hstack((v5, w5)), np.hstack((v6, w6))
-]).T # Transpose to be 6x6 (screw rows)
-
-# Final fixed offset from link_6/flange to tool0: 90 deg about Y
-# This is T_Link6_Tool0 at (0, 0, 0)
-T_Link6_Tool0_Rot = tft.quaternion_matrix(tft.quaternion_from_euler(0, np.pi/2, 0))[:3, :3]
-
-# M: Zero position transformation matrix (4x4)
-M = np.identity(4)
-M[:3, 3] = [0.374, 0.0, 0.63]
-M[:3, :3] = T_Link6_Tool0_Rot # assuming base to link6 is identity
-# M[:3, :3] = tft.quaternion_matrix([0.7071, 0.0, 0.7071, 0.0])[:3, :3] # Example 90 deg rotation about Y
-# M[:3, :3] = tft.quaternion_matrix([0, 0.7071, 0, 0.7071])[:3, :3] # Example 90 deg rotation about Y
-
-def screw_to_se3(S):
-    """Converts a 6-vector screw S=[v, w] to its 4x4 matrix representation [S]."""
-    w = S[3:]
-    v = S[:3]
-    w_skew = skew(w)
-    return np.block([
-        [w_skew, v.reshape(3, 1)],
-        [np.zeros((1, 4))]
-    ])
-
-def forward_kinematics(q):
-    """Computes T_EE_Base using PoE."""
-    T = M
-    for i in range(6):
-        S_matrix = screw_to_se3(SCREWS[:, i])
-        T = np.dot(expm(S_matrix * q[i]), T)
-    return T
-
-def geometric_jacobian(q):
-    """
-    Computes the 6x6 Geometric Jacobian J_s (space frame) using PoE method.
-    The final EE Jacobian J_b is then calculated as J_b = Ad(T_EE_Base^-1) * J_s.
-    """
-    J_s = np.zeros((6, 6))
-    T = np.identity(4)
-    for i in range(6):
-        # 1. Transform the space-frame screw S_i using the transformation T (T1*T2*...*Ti-1)
-        # Adjoint Matrix Ad_T maps the twist from Frame S (base) to Frame T
-        # Adjoint matrix is: [ R, 0; skew(p)R, R ]
+        # Six 6-element screw axes (v, w) expressed in the Base Frame at zero position
+        w1, w2, w3 = [0, 0, 1], [0, 1, 0], [0, 1, 0]
+        w4, w5, w6 = [1, 0, 0], [0, 1, 0], [1, 0, 0]
         
-        R = T[:3, :3]
-        p = T[:3, 3]
-        
-        Ad_T = np.block([
-            [R, np.zeros((3, 3))],
-            [skew(p) @ R, R]
+        # joint origins at q=0 in BASE frame
+        p1 = np.array([0.0,    0.0,   0.0   ])
+        p2 = np.array([0.0,    0.0,   0.29  ])
+        p3 = np.array([0.0,    0.0,   0.56  ])
+        p4 = np.array([0.0,    0.0,   0.63  ])
+        p5 = np.array([0.302,  0.0,   0.63  ])
+        p6 = np.array([0.374,  0.0,   0.63  ])
+
+        # Pitches are 0 for all revolute joints
+        S1 = ScrewToAxis(w1, p1, 0.0)
+        S2 = ScrewToAxis(w2, p2, 0.0)
+        S3 = ScrewToAxis(w3, p3, 0.0)
+        S4 = ScrewToAxis(w4, p4, 0.0)
+        S5 = ScrewToAxis(w5, p5, 0.0)
+        S6 = ScrewToAxis(w6, p6, 0.0)
+
+        self.Slist = np.column_stack((S1, S2, S3, S4, S5, S6))  # 6x6 matrix of screws
+
+        # Final fixed offset from link_6/flange to tool0: 90 deg about Y
+        T_Link6_Tool0_Rot = np.array([[0, 0, 1],
+                                      [0, 1, 0],
+                                      [-1, 0, 0]])
+
+        # M: Zero position transformation matrix (4x4)
+        self.M = np.identity(4)
+        self.M[:3, 3] = [0.374, 0.0, 0.63]
+        # self.M[:3, :3] = T_Link6_Tool0_Rot # assuming base to link6 is identity
+
+    def screw_to_se3(self, S):
+        """Converts a 6-vector screw S=[v, w] to its 4x4 matrix representation [S]."""
+        w = S[3:]
+        v = S[:3]
+        w_skew = VecToso3(w)
+        return np.block([
+            [w_skew, v.reshape(3, 1)],
+            [np.zeros((1, 4))]
         ])
-        
-        # 2. The i-th column of the Jacobian is J_s[:, i] = Ad_T @ S_i
-        J_s[:, i] = Ad_T @ SCREWS[:, i]
-        
-        # 3. Update the transformation T
-        S_matrix = screw_to_se3(SCREWS[:, i])
-        T = np.dot(T, expm(S_matrix * q[i]))
 
-    return J_s
+    def forward_kinematics(self, q):
+        """Computes T_EE_Base using PoE."""
+        T = self.M
+        for i in range(6):
+            S_matrix = self.screw_to_se3(self.Slist[:, i])
+            T = np.dot(expm(S_matrix * q[i]), T)
+        return T
+    
+    def ikin_space(self, Slist, M, T, thetalist0, eomg, ev):
+        
+
+    def geometric_jacobian(self, q):
+        q = np.asarray(q).reshape(6,)
+        return JacobianSpace(self.Slist, q)
+
+
+def main():
+    controller = Controller()
+    # q_test = [0, -np.pi/4, np.pi/2, 0, np.pi/4, 0]
+    q_test = np.zeros(6)
+    T_ee = controller.forward_kinematics(q_test)
+    q_des = controller.IKinSpace(T_ee, q_test)
+    J_geo = controller.geometric_jacobian(q_test)
+
+    print("End-Effector Transformation T_EE_Base:\n", np.round(T_ee, 3))
+    print("Inverse Kinematics Joint Angles q_des:\n", np.round(q_des, 3))
+    print("Geometric Jacobian J_geo:\n", np.round(J_geo, 3))
+
+if __name__ == "__main__":
+    main()
