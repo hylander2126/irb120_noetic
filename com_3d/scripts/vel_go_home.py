@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 import rospy
-# from com_3d.cartesian_move import execute_motion
-from com_3d.linear_move import execute_motion, move_joints_simple
-from com_3d.cartesian_simple import move_cartesian_simple
 import numpy as np
-
+from com_3d.velocity_controller import VelocityCommander
 
 # RETRIEVED BY JOGGING ROBOT TO *EXACTLY* ALL ZERO JOINTS
 HOME_XYZ = [0.374000, 0.000000, 0.630000] # TOOL FLANGE IN ROBOT FRAME (from robot, not TF) (technically 374.01, 0.01, 629.99 mm)
@@ -19,23 +16,17 @@ X_OFFSET_FINGER = 0.08225+ 0.11 # X readings are ~192.25 mm 'less' than expected
 
 def main():
     rospy.init_node("go_home")
-    
-    # motion_success = execute_motion(
-    #     HOME_XYZ, q_desired=HOME_QUAT, cart_speed=0.03, eef_step=0.004, arm_logging=False)
-    # motion_success = execute_motion(
-    #     HOME_XYZ,
-    #     cart_speed=0.03,
-    #     force_stop=False,
-    #     arm_logging=False
-    # )
 
-    # motion_success = move_joints_simple(
-    #     [0, 0, 0, 0, 0, 0], duration=4.0, goal_time_tolerance=2.0
-    # )
+    commander = VelocityCommander()
 
-    motion_success = move_cartesian_simple(
-        HOME_XYZ,
-        HOME_QUAT,
+    rospy.loginfo("[go_home] Moving robot to home position using velocity control...")
+    # motion_success = commander.go_home_velocity(timeout=20.0)
+    # motion_success = commander.go_to_joint_target([0, 0.615, 0.867, 0, -1.482, 0], timeout=20.0) # we know this is prepush pose for "box"
+
+    motion_success = commander.move_cartesian_velocity(
+        [0, 0.1, 0],
+        [0, 0, 0],
+        duration=1,
     )
     
     if not motion_success:

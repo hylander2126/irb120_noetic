@@ -9,9 +9,9 @@
   <!-- ====== Params you can tweak ====== -->
   <xacro:property name="ft_mass" value="0.255"/>          <!-- kg (sensor) (from spec sheet) -->
   <xacro:property name="ft_cog_z" value="0.063"/>         <!-- meters in tool frame (from spec sheet)-->
-  <xacro:property name="ft_length" value="0.03"/>         <!-- FT sensor length -->
+  <xacro:property name="ft_length" value="0.08225"/>         <!-- FT sensor length -->
   <xacro:property name="finger_mass" value="0.066"/>      <!-- kg (finger) (from onshape) -->
-  <xacro:property name="finger_length" value="0.1143"/>   <!-- finger length (from onshape)-->
+  <xacro:property name="finger_length" value="0.110"/>   <!-- finger length (from onshape)-->
   <!-- Total offset from link_6 to finger tip will be ft_length + finger_length -->
 
   <!-- ====== FT sensor link mounted to link_6 ====== -->
@@ -22,7 +22,7 @@
       <inertia ixx="5e-4" iyy="5e-4" izz="5e-4" ixy="0" ixz="0" iyz="0"/>
     </inertial>
     <visual>
-      <origin xyz="0 0 ${ft_length/2}" rpy="0 0 0"/>
+      <origin xyz="0 0 ${ft_length / 2}" rpy="0 0 0"/>
       <geometry>
         <cylinder radius="0.025" length="${ft_length}"/>
       </geometry>
@@ -32,9 +32,9 @@
     </visual>
     <!-- Basic cylinder collision geom -->
     <collision>
-        <origin xyz="0 0 ${ft_length / 4}" rpy="0 0 0"/>
+        <origin xyz="0 0 ${ft_length / 2}" rpy="0 0 0"/>
         <geometry>
-            <cylinder radius="0.025" length="${ft_length / 2}"/>
+            <cylinder radius="0.025" length="${ft_length / 2.5}"/>
         </geometry>
     </collision>
   </link>
@@ -42,7 +42,7 @@
   <joint name="link_6_to_ft" type="fixed">
     <parent link="link_6"/>
     <!-- Adjust xyz/rpy to match your real mounting orientation -->
-    <origin xyz="0.001 0 0" rpy="0 1.5708 0"/>
+    <origin xyz="0 0 0" rpy="0 1.5708 0"/> <!-- Was 0.0001 0 0-->
     <child link="ft_link"/>
   </joint>
 

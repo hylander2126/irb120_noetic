@@ -248,18 +248,10 @@ def execute_motion(
     return bool(ok)
 
 
-def move_joints_simple(
-    q_goal,
-    duration=3.0,
-    goal_time_tolerance=2.0,
-    pos_tolerance=0.01,          # [rad] per joint tolerance
-    check_timeout=10.0            # [s] max extra time allowed for checking
-):
-    import rospy
+def move_joints_simple(q_goal, duration=3.0, goal_time_tolerance=2.0):
     from sensor_msgs.msg import JointState
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
     from control_msgs.msg import FollowJointTrajectoryActionGoal
-    from rospy.exceptions import ROSException
 
     # ------------ Simple joint-space motion via EGM FollowJointTrajectory ------------
     JOINT_CMD_TOPIC   = "/egm/joint_trajectory_controller/follow_joint_trajectory/goal"
@@ -298,56 +290,10 @@ def move_joints_simple(
 
     pub.publish(goal_msg)
 
-    # Wait approximately for trajectory duration before checking
-    rospy.sleep(duration)
-
-    # ----------------- CHECK FINAL JOINT POSITIONS -----------------
-    success = False
-    deadline = rospy.Time.now() + rospy.Duration(check_timeout)
-
-    def get_joint_positions():
-        """Fetch latest joint positions in JOINT_NAMES order, or None if not available."""
-        try:
-            js = rospy.wait_for_message(JOINT_STATE_TOPIC, JointState, timeout=0.5)
-        except ROSException:
-            return None
-
-        name_to_pos = {n: p for n, p in zip(js.name, js.position)}
-        try:
-            return [name_to_pos[jn] for jn in JOINT_NAMES]
-        except KeyError:
-            # Some joints missing from this message
-            return None
-
-    while not rospy.is_shutdown() and rospy.Time.now() < deadline:
-        q_curr = get_joint_positions()
-        if q_curr is None:
-            continue
-
-        errs = [abs(qc - qg) for qc, qg in zip(q_curr, q_goal)]
-        max_err = max(errs)
-
-        rospy.logdebug(
-            f"[move_joints_simple] Checking joints: "
-            f"q_curr={q_curr}, q_goal={q_goal}, max_err={max_err:.4f}"
-        )
-
-        if max_err <= pos_tolerance:
-            rospy.loginfo(
-                f"[move_joints_simple] Joint goal reached within tolerance "
-                f"({max_err:.4f} <= {pos_tolerance})."
-            )
-            success = True
-            break
-
-    if not success:
-        rospy.logwarn(
-            f"[move_joints_simple] Joint goal NOT reached within tolerance "
-            f"after {check_timeout:.1f}s extra. (pos_tolerance={pos_tolerance})"
-        )
+    # Naive wait for motion to complete
+    rospy.sleep(duration + 3.0)
 
     # Stop EGM
     _stop_egm()
 
-    return success
-
+    return True

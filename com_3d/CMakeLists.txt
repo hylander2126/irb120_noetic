@@ -166,6 +166,10 @@ catkin_install_python(PROGRAMS
   scripts/go_home.py
   scripts/go_prep.py
   scripts/move.py
+  scripts/egm_vel_apply.py
+  scripts/vel_go_home.py
+  scripts/vel_move.py
+  scripts/egm_vel_apply.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
