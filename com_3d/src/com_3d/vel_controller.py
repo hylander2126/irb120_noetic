@@ -16,7 +16,7 @@ from urdf_parser_py.urdf import URDF
 from kdl_parser_py.urdf import treeFromUrdfModel
 import PyKDL as kdl
 
-from com.force_watcher import ForceWatcher
+from .force_watcher import ForceWatcher
 
 
 # Global EGM/Logging wrappers
@@ -27,7 +27,7 @@ def _start_egm_wait_till_active(timeout=5.0):
     """
     Blocks until the EGM controller reports "active: True" for at least one channel.
     """
-    rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
+    # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
     t_start = rospy.Time.now()
 
     while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
@@ -45,18 +45,15 @@ def _start_egm_wait_till_active(timeout=5.0):
         # Check if OUR channel reports active: True
         our_channel = msg.egm_channels[0]
         if our_channel.active:
-            rospy.loginfo("[EGM Wait] Status 'active: True' detected.")
+            # rospy.loginfo("[EGM Wait] Status 'active: True' detected.")
             return True
-
-
-    rospy.logerr(f"[EGM Wait] Timed out after {timeout}s waiting for EGM to become active.")
     raise RuntimeError("EGM did not become active within timeout.")
 
 def _stop_egm_wait_till_active(timeout=5.0):
     """
     Blocks until the EGM controller reports "active: False" for at least one channel.
     """
-    rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
+    # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
     t_start = rospy.Time.now()
 
     while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
@@ -74,11 +71,8 @@ def _stop_egm_wait_till_active(timeout=5.0):
         # Check if OUR channel reports active: False
         our_channel = msg.egm_channels[0]
         if not our_channel.active:
-            rospy.loginfo("[EGM Wait] Status 'active: False' detected.")
+            # rospy.loginfo("[EGM Wait] Status 'active: False' detected.")
             return True
-
-
-    rospy.logerr(f"[EGM Wait] Timed out after {timeout}s waiting for EGM to become active.")
     raise RuntimeError("EGM did not become active within timeout.")
 
 
@@ -130,7 +124,7 @@ class VelocityController:
         rate_hz             =100.0,
         max_joint_vel       =2.0,          # rad/s safety clamp
         joint_safety_margin =0.05,   # rad away from hard limits
-        floor_z_margin      =0.1,       # Lowest the fingertip should be allowed to go
+        floor_z_margin      =0.06,       # Lowest the fingertip should be allowed to go
     ):
         self.base_link           = base_link
         self.tip_link            = tip_link
@@ -238,8 +232,6 @@ class VelocityController:
         self._wait_for_joint_state()
         rospy.loginfo("[VC] Ready.")
 
-        # current_tip_pos = self.
-        # rospyloginfo(f"[VC] ")
 
     # =====================================================================
     #   PUBLIC API
@@ -262,26 +254,26 @@ class VelocityController:
                 f"q_target must be length {self.nj} (got {q_target.shape})\n"
                 f"Joint order is: {self.joint_names}"
             )
-
         # ---------- SAFETY: check floor_z constraint ----------
-        if self._tip_position(q_target)[2] < self.floor_z_margin:
+        if not self._floor_constraint_isok(q_target):
             raise RuntimeError(
                 f"[VC] Refusing move_to_joint_positions to target {q_target}"
                 f" because fingertip Z would be below floor limit "
             )
         # ------------------------------------------------------
 
-
         _start_egm_wait_till_active()
         rospy.sleep(0.5)
 
         start_time = rospy.Time.now()
-        rospy.loginfo(f"[VC] move_to_joint_positions -> {q_target}")
+        rospy.loginfo(f"[VC] move_to_joint_positions:\n{q_target}")
+
+        early_stop_reason = None # For logging
 
         while not rospy.is_shutdown():
             if (rospy.Time.now() - start_time).to_sec() > timeout:
-                rospy.logwarn(f"[VC] move_to_joint_positions timed out."
-                              f"\nWith error: {q_target - q_curr}")
+                rospy.logwarn(f"[VC] move_to_joint_positions timed out. Joint errors:\n"
+                              f"{q_target - q_curr}, norm={np.linalg.norm(q_target - q_curr)}")
                 break
 
             with self._state_lock:
@@ -307,23 +299,15 @@ class VelocityController:
 
             q_dot_cmd = vel_raw
 
-            # TEMP Let's see what joint commands are being calced
-            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd: {np.round(q_dot_cmd, 3)}")
-
             # Joint-limit avoidance (very simple clamp near limits)
             q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
 
-            if not bypass_floor:
-                # -------------- SAFETY: check floor_z constraint ----------
-                q_next = q_curr + q_dot_cmd * self.dt
-                if self._tip_position(q_next)[2] < self.floor_z_margin:
-                    rospy.logwarn_throttle(
-                        1.0,
-                        f"[VC] Joint command would move fingertip BELOW floor {self.floor_z_margin} limit."
-                        f" Zeroing velocities."
-                    )
-                    q_dot_cmd[:] = 0.0
-                # ---------------------------------------------------------
+            # -------------- SAFETY: check floor_z constraint ----------
+            if not bypass_floor and not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt): # q_next
+                rospy.logwarn_throttle(1.0, f"[VC] Next joint q violates floor constraint: {self.floor_z_margin}. Zeroing velocities.")
+                early_stop_reason = "floor_z constraint violated."
+                break
+            # ---------------------------------------------------------
 
             # Saturate joint velocities
             q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
@@ -333,10 +317,9 @@ class VelocityController:
 
         # Stop motion
         self._publish_velocity(np.zeros(self.nj))
-
         rospy.sleep(0.5)
         _stop_egm_wait_till_active()
-        return True
+        return True if early_stop_reason is None else False
 
     def cartesian_velocity(self, v, w, duration, arm_logs=False, k_safe=None):
         """
@@ -355,7 +338,18 @@ class VelocityController:
         _start_egm_wait_till_active()
         rospy.sleep(0.5)
 
+        # Force watcher
+        if k_safe is not None:
+            fw = ForceWatcher(
+                ft_topic="/netft_data_transformed",
+                k_safe=k_safe,
+                debug=True,
+            )
+            rospy.loginfo(f"[VC] ForceWatcher armed with k_safe={k_safe}.")
+
         start_time = rospy.Time.now()
+
+        early_stop_reason = None # For logging
 
         while not rospy.is_shutdown():
             if (rospy.Time.now() - start_time).to_sec() > duration:
@@ -367,43 +361,41 @@ class VelocityController:
                 self.rate.sleep()
                 continue
 
+            # Check force watcher
+            if k_safe is not None and fw.trigger:
+                early_stop_reason = "force < f_safe."
+                rospy.loginfo(f"[VC] Stopped due to: {early_stop_reason}")
+                break
+
             # Compute joint velocities via KDL velocity IK
             q_dot_cmd = self._ik_velocity(q_curr, twist_np)
 
-            # TEMP Let's see what joint commands are being calced
-            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd from ik_solver:\n {np.round(q_dot_cmd, 3)}")
-
             # Joint-limit avoidance
             q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
-            # TEMP Let's see what joint commands are being calced
-            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd after joint limit avoidance:\n {np.round(q_dot_cmd, 3)}")
 
             # -------------- SAFETY: check floor_z constraint ----------
-            q_next = q_curr + q_dot_cmd * self.dt
-            if self._tip_position(q_next)[2] < self.floor_z_margin:
-                rospy.logwarn_throttle(
-                    1.0,
-                    f"[VC] Joint command would move fingertip BELOW floor {self.floor_z_margin} limit."
-                    f" Zeroing velocities."
-                )
-                q_dot_cmd[:] = 0.0
+            if not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt):
+                rospy.logwarn_throttle(1.0, f"[VC] Next joint q violates floor constraint: {self.floor_z_margin}. Zeroing velocities.")
+                # q_dot_cmd[:] = 0.0
+                early_stop_reason = "floor_z constraint violated."
+                break
             # ---------------------------------------------------------
 
             # Clamp velocities
             q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
-            # TEMP Let's see what joint commands are being calced
-            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd after clamping:\n {np.round(q_dot_cmd, 3)}")
-
 
             self._publish_velocity(q_dot_cmd)
             self.rate.sleep()
 
         # Stop after duration
         self._publish_velocity(np.zeros(self.nj))
-
         rospy.sleep(0.5)
         _stop_egm_wait_till_active()
-        return True
+        if early_stop_reason is None or early_stop_reason=="force < f_safe":
+            return True
+        elif early_stop_reason=="floor_z constraint violated.":
+            rospy.logerr(f"[VC] cartesian_velocity stopped early due to: {early_stop_reason}")
+            return False
     
 
     def compute_ik(self, xyz, rpy, q_seed=None):
@@ -596,3 +588,10 @@ class VelocityController:
         F_tip = self._fk_position(q_np)
         p = F_tip.p
         return np.array([p[0], p[1], p[2]])
+    
+    def _floor_constraint_isok(self, q_np):
+        """Return True if fingertip Z is above floor_z_margin.
+        q_np: np.array of current or future joint angles.
+        """
+        pos = self._tip_position(q_np)
+        return pos[2] >= self.floor_z_margin

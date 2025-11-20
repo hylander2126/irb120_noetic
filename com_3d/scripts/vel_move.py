@@ -74,8 +74,8 @@ def main():
 
     ctrl = VelocityController(max_joint_vel=1.0)
 
-    prep_xyz = OBJECT_MOTIONS[object_name]["prep"]
-    push_xyz = OBJECT_MOTIONS[object_name]["push"]
+    # prep_xyz = OBJECT_MOTIONS[object_name]["prep"]
+    # push_xyz = OBJECT_MOTIONS[object_name]["push"]
     # orientation = OBJECT_MOTIONS[object_name]["quat"]
     joint_pos = OBJECT_MOTIONS[object_name]["prep_q"]
 
@@ -84,39 +84,39 @@ def main():
     
     # 1) Move to pre-push pose
     success_prep = ctrl.move_to_joint_positions(
-        joint_pos, timeout=10.0
+        joint_pos, timeout=5.0, tol=7e-3
     )
     if not success_prep:
         rospy.logerr("[go_forward] Pre-push motion failed!")
         return
     else:
-        rospy.loginfo("[go_forward] Pre-push pose reached.")
-        rospy.sleep(1.0) # brief pause
+        rospy.loginfo("[go_forward] Pre-push pose reached.\n")
 
     
     # 2) Execute push motion
     success_push = ctrl.cartesian_velocity(
         v=[0.01, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
-        duration=3.0
+        duration=6.0,
+        k_safe=0.5
     )
 
     if not success_push:
         rospy.logerr("[go_forward] Push motion failed!")
         return
     else:
-        rospy.loginfo("[go_forward] succeeded.")
+        rospy.loginfo("[go_forward] succeeded.\n")
 
 
     # 3) Return to pre-push pose
     success_return = ctrl.move_to_joint_positions(
-        joint_pos, timeout=10.0
+        joint_pos, timeout=5.0
     )
 
     if not success_return:
         rospy.logerr("[go_forward] Return motion failed!")
     else:
-        rospy.loginfo("[go_forward] Return to initial pose succeeded.")
+        rospy.loginfo("[go_forward] Return to initial pose succeeded.\n")
 
 
 if __name__ == "__main__":
