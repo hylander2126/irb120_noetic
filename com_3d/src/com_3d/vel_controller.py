@@ -91,8 +91,8 @@ def _stop_egm():
         rospy.logwarn(f"stop_egm call failed: {e}")
 
 def _arm_logs():
-    rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
-    rospy.sleep(0.05)
+    # rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
+    # rospy.sleep(0.05)
     rospy.Publisher('/com_3d/log_start', Empty, queue_size=1, latch=True).publish(Empty())
 
 def _disarm_logs():
@@ -338,6 +338,7 @@ class VelocityController:
         _start_egm_wait_till_active()
         
         _arm_logs() if arm_logs else None
+        rospy.loginfo(f"LOGS ARMED AT ROS TIME:{rospy.Time.now().to_sec():.3f}")
         rospy.sleep(0.5)
 
         # Force watcher
@@ -397,10 +398,8 @@ class VelocityController:
         rospy.sleep(0.5)
         _stop_egm_wait_till_active()
 
-        if k_safe is not None:
-            fw.exit_fw() # exit fw if not already done
-
         _disarm_logs() if arm_logs else None
+        rospy.loginfo(f"LOGS DISARMED AT ROS TIME:{rospy.Time.now().to_sec():.3f}")
 
         if early_stop_reason is None:
             return True

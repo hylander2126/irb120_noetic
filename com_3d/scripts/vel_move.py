@@ -97,8 +97,8 @@ def main():
     success_push = ctrl.cartesian_velocity(
         v=[0.01, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
-        duration=16.0,
-        k_safe=0.8,
+        duration=8.0, # 16
+        # k_safe=0.1,
         arm_logs=True,
     )
 

@@ -2,12 +2,11 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="abb_irb120_3_58"> <!-- THIS HAS TO MATCH THE SEMANTIC DESCRIPTION MOVEIT HAS (see launch)-->
 
   <!-- Include the stock ABB IRB120 -->
-  <!-- <xacro:include filename="$(find abb_irb120_support)/urdf/irb120_3_58.xacro"/> -->
-  <xacro:include filename="$(find abb_irb120_support)/urdf/irb120_3_58_macro.xacro"/>
-  <!-- Instantiate the ABB IRB120 robot -->
-  <xacro:abb_irb120_3_58 prefix=""/>
+  <!-- TODO: Should this be Gazebo? Or the default one under the parent irb120_support??? -->
+  <!-- <xacro:include filename="$(find abb_irb120_gazebo)/urdf/irb120_3_58.xacro"/> -->
+  <xacro:include filename="$(find abb_irb120_support)/urdf/irb120_3_58.xacro"/>
 
-  <!-- ====== Params to tweak ====== -->
+  <!-- ====== Params you can tweak ====== -->
   <xacro:property name="ft_mass" value="0.255"/>          <!-- kg (sensor) (from spec sheet) -->
   <xacro:property name="ft_cog_z" value="0.063"/>         <!-- meters in tool frame (from spec sheet)-->
   <xacro:property name="ft_length" value="0.08225"/>         <!-- FT sensor length -->

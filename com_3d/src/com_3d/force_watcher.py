@@ -36,7 +36,7 @@ class ForceWatcher:
         self.peak_buf = [0.0] * 50 # 5 being the peak window
 
         # Contact detection parameters
-        self.contact_delta = 0.050  # N above baseline to declare contact (this is our resolution!)
+        self.contact_delta = 0.07  # N above baseline to declare contact (this is our resolution!)
         # ^ noise floor (empirical) appears to be 0.138 N
         self.contact_slope = 0.1  # N per sample increase to declare contact
         self.contact_samples = 2  # 3 worked... consecutive samples needed for contact
@@ -122,7 +122,7 @@ class ForceWatcher:
             self.peak_buf.pop(0)
             self.peak_buf.append(f_med)
             if self.peak_buf.count(0.0) == 0:
-                self.debug_msg(f"Peak buffer looks like: {np.round(self.peak_buf, 3)}")
+                # self.debug_msg(f"Peak buffer looks like: {np.round(self.peak_buf, 3)}")
                 self.peak = float(np.max(self.peak_buf))
                 self.debug_msg(f"Peak force recorded: {self.peak:.3f} N")
                 self.STATE = "CONTACT"
@@ -136,7 +136,11 @@ class ForceWatcher:
             #     # pass
 
             # thresh = (1.0 - self.k_safe) * self.peak
-            thresh = self.peak - (self.k_safe * self.peak)
+            f_safe = self.peak - (self.k_safe * self.peak)
+            thresh = np.max([f_safe, self.noise_floor])
+            if thresh != f_safe:
+                self.debug_msg(f"Adjusted f_safe to noise floor: {thresh:.3f} N (original f_safe: {f_safe:.3f} N, noise floor: {self.noise_floor:.3f} N)", 0)
+
             self.debug_msg(f"Tracking current:{f_med:.3f}, peak: {self.peak:.3f} for f_safe: {thresh:.3f}", 0.1)
             
             if self.peak > 0.0:

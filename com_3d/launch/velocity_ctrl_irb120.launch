@@ -18,10 +18,16 @@
     <arg name="debug" value="$(arg debug)"/>
   </include>
 
+  <!-- NEEDED FOR TF: Broadcast /egm/joint_states to default /joint_states -->
+  <node pkg="topic_tools"
+        type="relay"
+        name="joint_states_alias"
+        args="/egm/joint_states /joint_states"
+        output="screen" />
+
   <!-- Spawn the robot and rsp -->
-  <!-- <include file="$(find com_3d)/launch/load_irb120_3_58.launch" /> -->
   <param name="robot_description" command="$(find xacro)/xacro '$(find com_3d)/urdf/irb120_with_finger.xacro'" />
-  <node pkg="robot_state_publisher" type="robot_state_publisher" name="rsp" output="screen"/>
+  <node name="rsp" pkg="robot_state_publisher" type="robot_state_publisher" output="screen"/>
 
   <!-- ############################### -->
   <!-- ## Startup Script (EGM init) ## -->
@@ -79,16 +85,16 @@
 
 
   <!-- LAUNCH ALL LOGGERS -->
-  <node pkg="com_3d" type="sync_logger.py" name="sync_logger" output="screen">
+  <node pkg="com_3d" type="sync_logger.py" name="sync_logger" output="screen" args="-debug">
     <param name="run_base" value="$(arg run_base)"/>
     <param name="base_frame" value="base_link"/>
     <param name="ee_frame"   value="finger_tip"/>
-    <param name="ft_topic"   value="/netft_data_transformed"/>
+    <param name="ft_topic"   value="netft_data_transformed"/>
     <param name="dets_topic_name" value="tag_detections"/>
     <param name="tag_max_age" value="0.10"/>
 
     <!-- video/overlay config -->
-    <param name="image_topic"   value="/tag_detections_image"/>
+    <param name="image_topic"   value="tag_detections_image"/>
     <param name="fps_hint"      value="30"/>
     <param name="warmup_frames" value="10"/>
   </node>

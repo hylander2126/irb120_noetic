@@ -25,12 +25,12 @@ class FTClockLogger:
         self.run_base   = rospy.get_param('~run_base')
         self.base_frame = rospy.get_param('~base_frame', 'base_link')
         self.ee_frame   = rospy.get_param('~ee_frame',   'finger_tip')
-        self.ft_topic   = rospy.get_param('~ft_topic',   '/netft_data_transformed')
+        self.ft_topic   = '/' + rospy.get_param('~ft_topic',   'netft_data_transformed')
         self.tag_topic  = '/' + rospy.get_param('~dets_topic_name', 'tag_detections').lstrip('/')
         self.tag_max_age = float(rospy.get_param('~tag_max_age', 0.10))
         self.flush_period = float(rospy.get_param('~flush_period', 0.25))
         # --- params for video ---
-        self.image_topic   = rospy.get_param('~image_topic', '/tag_detections_image')  # overlay from apriltag_ros
+        self.image_topic   = '/' + rospy.get_param('~image_topic', 'tag_detections_image')  # overlay from apriltag_ros
         self.fps_hint      = float(rospy.get_param('~fps_hint', FPS_HINT_DEFAULT))
         self.warmup_frames = int(rospy.get_param('~warmup_frames', WARMUP_FRAMES_DEFAULT))
 
@@ -71,7 +71,8 @@ class FTClockLogger:
                 ts.transform.rotation.z,
                 ts.transform.rotation.w,
             ]
-        except Exception:
+        except Exception as e:
+            rospy.logwarn(f"Failed to lookup initial transform from {self.base_frame} to {self.ee_frame}: {e}")
             # leave ee_last as zeros
             self.ee_last = [0, 0, 0, 0, 0, 0, 0]
             pass
@@ -218,7 +219,8 @@ class FTClockLogger:
                 ts.transform.rotation.w,
             ]
             self.ee_last = ee[:]
-        except Exception:
+        except Exception as e:
+            rospy.logwarn(f"Failed to lookup transform from {self.base_frame} to {self.ee_frame} at time {t}: {e}")
             if self.ee_last is not None:
                 ee = self.ee_last[:]
 
