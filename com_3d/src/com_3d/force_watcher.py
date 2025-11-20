@@ -15,40 +15,37 @@ class ForceWatcher:
     def __init__(
             self,
             ft_topic,
-            k_safe=0.5,
+            k_safe=0.9,
             baseline_window=50,
             median_window=5,
-            contact_delta=0.150,  # N above baseline to declare contact (this is our resolution!)
-            # ^ noise floor (empirical) appears to be 0.138 N
-            contact_slope=0.1,  # N per sample increase to declare contact
-            contact_samples=2,  # 3 worked... consecutive samples needed for contact
-            fall_samples=5,     # consecutive samples needed for falling trigger
             debug=False,
+            initial_state=None # (i.e. for starting baseline after motion)
         ):
         self.k_safe = k_safe
         self.debug = debug
 
         # Baseline / noise estimation
-        self.baseline_window = baseline_window
         self.baseline_buf = [0.0] * baseline_window # prepare empty buffer
         self.baseline_ready = False
         self.noise_floor = 0.0
 
         # Median smoothing
-        self.median_window = median_window
         self.median_buf = [0.0] * median_window
 
+        # Peak bufffer
+        self.peak_buf = [0.0] * 50 # 5 being the peak window
+
         # Contact detection parameters
-        self.contact_delta = contact_delta
-        self.contact_slope = contact_slope
-        self.contact_samples = contact_samples
+        self.contact_delta = 0.050  # N above baseline to declare contact (this is our resolution!)
+        # ^ noise floor (empirical) appears to be 0.138 N
+        self.contact_slope = 0.1  # N per sample increase to declare contact
+        self.contact_samples = 2  # 3 worked... consecutive samples needed for contact
 
         # Falling / trigger parameters
-        self.fall_samples = fall_samples
+        self.fall_samples = 5     # consecutive samples needed for falling trigger
 
         # State
-        self.state = "baseline"
-        self.in_contact = False
+        self.STATE = initial_state
         self.trigger = False
         self.peak = 0.0
 
@@ -76,12 +73,14 @@ class ForceWatcher:
         self.median_buf.append(f)
         f_med = np.median(self.median_buf)
 
+        prev_med = self.prev_med
+
         # Get peak always
-        self.peak = max(self.peak, f_med)
-        self.debug_msg(f"New Peak!: {self.peak:.3f} N", 1.0)
+        # self.peak = max(self.peak, f_med)
+        # self.debug_msg(f"New Peak!: {self.peak:.3f} N", 0.05)
 
         # ------------ 1) BASELINE / SEARCHING STATE ------------
-        if self.state == "baseline":
+        if self.STATE == "BASELINE":
             # Build baseline buffer
             self.baseline_buf.pop(0)
             self.baseline_buf.append(f_med)
@@ -89,70 +88,82 @@ class ForceWatcher:
             if not self.baseline_ready:
                 # Wait until enough samples collected
                 if self.baseline_buf.count(0.0) == 0:
-                    self.baseline_ready = True    
-                # Still update prev_med for slope computation later
-                self.prev_med = f_med
-                return
-            
-            # Estimate noise floor as median of baseline buffer/window
-            self.noise_floor = float(np.median(self.baseline_buf))
-
-            # Check for sustained rise above baseline
-            if self.prev_med is not None:
-                df = 0.0
+                    self.baseline_ready = True
+                    # Estimate noise floor as median of baseline buffer/window
+                    self.noise_floor = float(np.median(self.baseline_buf))
             else:
-                df = f_med - self.prev_med # current (smoothed) minus previous
+                self.debug_msg(f"Noise floor found: {self.noise_floor:.3f} N\n plus contact delta: {self.noise_floor + self.contact_delta:.3f}", 0)
+                self.STATE = "MONITOR"
+        
+        # ------------ 2) MONITORING FOR CONTACT ------------
+        if self.STATE == "MONITOR":
+            # Check for sustained rise above baseline
+            if prev_med is None:
+                df = 0.0 # Catch the first sample
+            else:
+                df = f_med - prev_med # current (smoothed) minus previous
             
-
-            if (f_med-self.noise_floor) > self.contact_delta:
-                self.debug_msg(f"Contact magnitude met: df={df:.3f}, contact_slope={self.contact_slope}")
-                
-                if True: # TEMP DISABLING self.contact_slope:
-                    self.debug_msg(f"Contact slope met: df={df:.3f} > {self.contact_slope:.3f}")
-                    self.contact_count += 1
-                    if self.contact_count >= self.contact_samples:
-                        self.state = "contact"
-                        self.in_contact = True
-                        # self.peak = f_med
-                        self.debug_msg(f"CONTACT DETECTED! Noise floor {self.noise_floor:.3f} N")
-                else:
-                    self.debug_msg(f"Contact slope NOT met: df={df:.3f} <= {self.contact_slope:.3f}")
-                    self.contact_count = 0
+            cond1 = (f_med-self.noise_floor) > self.contact_delta
+            cond2 = True # TEMP DISABLING     df > self.contact_slope:
+            if cond1 and cond2:
+                self.contact_count += 1
+                self.debug_msg(f"""Contact magnitude met: f_med={f_med:.3f} N, (contact_delta={self.contact_delta:.3f})""") if cond1 else None
+                self.debug_msg(f"Min slope met (TEMP check disabled)")
+                if self.contact_count >= self.contact_samples:
+                    self.STATE = "PEAK"
+                    self.debug_msg(f"{self.contact_count} CONTACTS DETECTED!", 0)
             else:
                 self.contact_count = 0
+                self.debug_msg(f"""Contact magnitude NOT met: \nf_med={f_med:.3f} <= noise floor+delta={self.noise_floor+self.contact_delta:.3f} N \nContact count reset.""", 0.1)
 
-            self.prev_med = f_med
-            return
-        
-        # ------------ 2) CONTACTE / PEAK TRACING ------------
-        if self.state == "contact":
-            rospy.loginfo
-            # Require valid peak before checking fall
-            if self.peak <= 0.0:
-                self.prev_med = f_med
-                return
+        # ------------ 3) PEAK TRACKING ------------
+        if self.STATE == "PEAK":
+            # Record the peak and average over several samples
+            self.peak_buf.pop(0)
+            self.peak_buf.append(f_med)
+            if self.peak_buf.count(0.0) == 0:
+                self.debug_msg(f"Peak buffer looks like: {np.round(self.peak_buf, 3)}")
+                self.peak = float(np.max(self.peak_buf))
+                self.debug_msg(f"Peak force recorded: {self.peak:.3f} N")
+                self.STATE = "CONTACT"
+
+
+        # ------------ 3) CONTACT / PEAK TRACING ------------
+        if self.STATE == "CONTACT":
+            # # Require valid peak before checking fall
+            # if self.peak <= 0.0:
+            #     self.prev_med = f_med
+            #     # pass
+
+            # thresh = (1.0 - self.k_safe) * self.peak
+            thresh = self.peak - (self.k_safe * self.peak)
+            self.debug_msg(f"Tracking current:{f_med:.3f}, peak: {self.peak:.3f} for f_safe: {thresh:.3f}", 0.1)
             
-            thresh = (1.0 - self.k_safe) * self.peak
-
-            if f_med < thresh:
-                self.below_count += 1
-                self.debug_msg(f"Falling detected: f_med={f_med:.3f} N < thresh={thresh:.3f} N "
-                               f"({self.below_count}/{self.fall_samples})", 1.0)
-                if self.below_count >= self.fall_samples:
-                    self.state = "triggered"
-                    self.trigger = True
-                    
-                    self.debug_msg(f"Stop triggered(peak: {self.peak:.3f} N, threshold: {thresh:.3f} N, current: {f_med:.3f} N).")
-            else:
-                self.below_count = 0
-
-            self.prev_med = f_med
-            return
+            if self.peak > 0.0:
+                if f_med < thresh:
+                    self.below_count += 1
+                    self.debug_msg(f"Falling detected: f_med={f_med:.3f} N < thresh={thresh:.3f} N "
+                                f"({self.below_count}/{self.fall_samples})", 1.0)
+                    if self.below_count >= self.fall_samples:
+                        self.STATE = "TRIGGERED"
+                        self.trigger = True
+                        self.debug_msg(f"Stop triggered(peak: {self.peak:.3f} N, threshold: {thresh:.3f} N, current: {f_med:.3f} N).")
+                        self.sub.unregister()
+                else:
+                    self.below_count = 0
         
+        # ------------ 4) UPDATE PREV_MED ONCE ------------
+        self.prev_med = f_med
+
 
     def debug_msg(self, msg, throttle=None):
         if self.debug:
-            if throttle is not None:
-                rospy.loginfo_throttle(throttle, f"[ForceWatcher] {msg}")
-            else:
+            if throttle is None:
                 rospy.loginfo(f"[ForceWatcher] {msg}")
+            elif throttle == 0:
+                rospy.loginfo_once(f"[ForceWatcher] {msg}")
+            else:
+                rospy.loginfo_throttle(throttle, f"[ForceWatcher] {msg}")
+
+    def exit_fw(self):
+        self.sub.unregister()

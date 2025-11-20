@@ -97,8 +97,9 @@ def main():
     success_push = ctrl.cartesian_velocity(
         v=[0.01, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
-        duration=6.0,
-        k_safe=0.5
+        duration=16.0,
+        k_safe=0.8,
+        arm_logs=True,
     )
 
     if not success_push:
@@ -110,7 +111,7 @@ def main():
 
     # 3) Return to pre-push pose
     success_return = ctrl.move_to_joint_positions(
-        joint_pos, timeout=5.0
+        joint_pos, timeout=5.0, tol=7e-3
     )
 
     if not success_return:

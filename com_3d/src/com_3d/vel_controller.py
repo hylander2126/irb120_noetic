@@ -336,6 +336,8 @@ class VelocityController:
         rospy.loginfo(f"[VC] cartesian_velocity v={v}, w={w}, duration={duration}")
 
         _start_egm_wait_till_active()
+        
+        _arm_logs() if arm_logs else None
         rospy.sleep(0.5)
 
         # Force watcher
@@ -362,10 +364,13 @@ class VelocityController:
                 continue
 
             # Check force watcher
-            if k_safe is not None and fw.trigger:
-                early_stop_reason = "force < f_safe."
-                rospy.loginfo(f"[VC] Stopped due to: {early_stop_reason}")
-                break
+            if k_safe is not None:
+                if fw.STATE is None:
+                    fw.STATE = "BASELINE"  # start baseline if not already started
+                if fw.trigger:
+                    early_stop_reason = "force < f_safe."
+                    rospy.loginfo(f"[VC] Stopped due to: {early_stop_reason}")
+                    break
 
             # Compute joint velocities via KDL velocity IK
             q_dot_cmd = self._ik_velocity(q_curr, twist_np)
@@ -391,11 +396,19 @@ class VelocityController:
         self._publish_velocity(np.zeros(self.nj))
         rospy.sleep(0.5)
         _stop_egm_wait_till_active()
-        if early_stop_reason is None or early_stop_reason=="force < f_safe":
+
+        if k_safe is not None:
+            fw.exit_fw() # exit fw if not already done
+
+        _disarm_logs() if arm_logs else None
+
+        if early_stop_reason is None:
             return True
         elif early_stop_reason=="floor_z constraint violated.":
             rospy.logerr(f"[VC] cartesian_velocity stopped early due to: {early_stop_reason}")
             return False
+        else:
+            return True
     
 
     def compute_ik(self, xyz, rpy, q_seed=None):
