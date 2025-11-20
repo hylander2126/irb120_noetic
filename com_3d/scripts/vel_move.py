@@ -83,56 +83,40 @@ def main():
 
     
     # 1) Move to pre-push pose
-    # success_prep = ctrl.move_to_joint_positions(
-    #     joint_pos, timeout=10.0
-    # )
-    success_prep = ctrl.cartesian_velocity(
-        v=[0, 0, -0.01], # XYZ
-        w=[0, 0, 0],   # RPY
-        duration=2.0
+    success_prep = ctrl.move_to_joint_positions(
+        joint_pos, timeout=10.0
     )
-
     if not success_prep:
         rospy.logerr("[go_forward] Pre-push motion failed!")
         return
     else:
         rospy.loginfo("[go_forward] Pre-push pose reached.")
+        rospy.sleep(1.0) # brief pause
 
     
-    # # 2) Execute push motion
-    # push_success = execute_motion(
-    #     push_xyz,
-    #     cart_speed=0.015,
-    #     k_safe=0.25,                # stop when force <= 60% of peak
-    #     ft_topic="netft_data_transformed",    # change to your topic
-    #     contact_thresh=0.4, # Should be higher than sensor noise (when not in contact)
-    #     arm_logging=True
-    # )
+    # 2) Execute push motion
+    success_push = ctrl.cartesian_velocity(
+        v=[0.01, 0, 0], # XYZ
+        w=[0, 0, 0],   # RPY
+        duration=3.0
+    )
 
-    # if not push_success:
-    #     rospy.logerr("[go_forward] Push motion failed!")
-    #     return
-    # else:
-    #     rospy.loginfo("[go_forward] succeeded.")
+    if not success_push:
+        rospy.logerr("[go_forward] Push motion failed!")
+        return
+    else:
+        rospy.loginfo("[go_forward] succeeded.")
 
 
-    # # # 3) Return to pre-push pose
-    # # success_return = execute_motion(
-    # #     prep_xyz,
-    # #     cart_speed=0.03,
-    # #     force_stop=False,
-    # #     ft_topic="netft_data_transformed",
-    # #     arm_logging=False
-    # # )
+    # 3) Return to pre-push pose
+    success_return = ctrl.move_to_joint_positions(
+        joint_pos, timeout=10.0
+    )
 
-    # success_return = move_joints_simple(
-    #     joint_pos, duration=4.0, goal_time_tolerance=2.0
-    # )
-
-    # if not success_return:
-    #     rospy.logerr("[go_forward] Return motion failed!")
-    # else:
-    #     rospy.loginfo("[go_forward] Return to initial pose succeeded.")
+    if not success_return:
+        rospy.logerr("[go_forward] Return motion failed!")
+    else:
+        rospy.loginfo("[go_forward] Return to initial pose succeeded.")
 
 
 if __name__ == "__main__":

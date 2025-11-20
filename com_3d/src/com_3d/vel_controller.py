@@ -5,19 +5,83 @@ import numpy as np
 import rospy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Empty
 
 from threading import Lock
 from abb_robot_msgs.srv import TriggerWithResultCode
+from abb_egm_msgs.msg import EGMState, EGMChannelState
 
 
 from urdf_parser_py.urdf import URDF
 from kdl_parser_py.urdf import treeFromUrdfModel
 import PyKDL as kdl
 
+from com.force_watcher import ForceWatcher
+
 
 # Global EGM/Logging wrappers
-EGM_START_SRV = "/rws/sm_addin/start_egm_joint"
-EGM_STOP_SRV  = "/rws/sm_addin/stop_egm"
+EGM_START_SRV    = "/rws/sm_addin/start_egm_joint"
+EGM_STOP_SRV     = "/rws/sm_addin/stop_egm"
+EGM_STATES_TOPIC = "/egm/egm_states"
+def _start_egm_wait_till_active(timeout=5.0):
+    """
+    Blocks until the EGM controller reports "active: True" for at least one channel.
+    """
+    rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
+    t_start = rospy.Time.now()
+
+    while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
+        try:
+            # Wait for a single message with a short timeout to prevent blocking
+            msg = rospy.wait_for_message(EGM_STATES_TOPIC, EGMState, timeout=0.1)
+        except rospy.ROSException:
+            continue # Timeout or shutdown occurred while waiting for the message
+        if not msg.egm_channels:
+            continue # The message is empty, which shouldn't happen but skip if it does
+
+        # Now try to start the EGM
+        _start_egm()
+
+        # Check if OUR channel reports active: True
+        our_channel = msg.egm_channels[0]
+        if our_channel.active:
+            rospy.loginfo("[EGM Wait] Status 'active: True' detected.")
+            return True
+
+
+    rospy.logerr(f"[EGM Wait] Timed out after {timeout}s waiting for EGM to become active.")
+    raise RuntimeError("EGM did not become active within timeout.")
+
+def _stop_egm_wait_till_active(timeout=5.0):
+    """
+    Blocks until the EGM controller reports "active: False" for at least one channel.
+    """
+    rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
+    t_start = rospy.Time.now()
+
+    while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
+        try:
+            # Wait for a single message with a short timeout to prevent blocking
+            msg = rospy.wait_for_message(EGM_STATES_TOPIC, EGMState, timeout=0.1)
+        except rospy.ROSException:
+            continue # Timeout or shutdown occurred while waiting for the message
+        if not msg.egm_channels:
+            continue # The message is empty, which shouldn't happen but skip if it does
+
+        # Now try to start the EGM
+        _stop_egm()
+
+        # Check if OUR channel reports active: False
+        our_channel = msg.egm_channels[0]
+        if not our_channel.active:
+            rospy.loginfo("[EGM Wait] Status 'active: False' detected.")
+            return True
+
+
+    rospy.logerr(f"[EGM Wait] Timed out after {timeout}s waiting for EGM to become active.")
+    raise RuntimeError("EGM did not become active within timeout.")
+
+
 def _start_egm():
     rospy.wait_for_service(EGM_START_SRV)
     try:
@@ -31,6 +95,14 @@ def _stop_egm():
         rospy.ServiceProxy(EGM_STOP_SRV, TriggerWithResultCode)(TriggerWithResultCode._request_class())
     except Exception as e:
         rospy.logwarn(f"stop_egm call failed: {e}")
+
+def _arm_logs():
+    rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
+    rospy.sleep(0.05)
+    rospy.Publisher('/com_3d/log_start', Empty, queue_size=1, latch=True).publish(Empty())
+
+def _disarm_logs():
+    rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
 
 
 class VelocityController:
@@ -50,21 +122,25 @@ class VelocityController:
 
     def __init__(
         self,
-        base_link="base_link",
-        tip_link="tool0",
-        urdf_param="robot_description",
-        joint_state_topic="/egm/joint_states",
-        vel_cmd_topic="/egm/joint_group_velocity_controller/command",
-        rate_hz=100.0,
-        max_joint_vel=2.0,          # rad/s safety clamp
-        joint_safety_margin=0.05,   # rad away from hard limits
+        base_link           ="base_link",
+        tip_link            ="finger_tip", # tool0",
+        urdf_param          ="robot_description",
+        joint_state_topic   ="/egm/joint_states",
+        vel_cmd_topic       ="/egm/joint_group_velocity_controller/command",
+        rate_hz             =100.0,
+        max_joint_vel       =2.0,          # rad/s safety clamp
+        joint_safety_margin =0.05,   # rad away from hard limits
+        floor_z_margin      =0.1,       # Lowest the fingertip should be allowed to go
     ):
-        self.base_link = base_link
-        self.tip_link = tip_link
-        self.rate_hz = float(rate_hz)
-        self.dt = 1.0 / self.rate_hz
-        self.max_joint_vel = float(max_joint_vel)
+        self.base_link           = base_link
+        self.tip_link            = tip_link
+        self.rate_hz             = float(rate_hz)
+        self.dt                  = 1.0 / self.rate_hz
+        self.max_joint_vel       = float(max_joint_vel)
         self.joint_safety_margin = float(joint_safety_margin)
+        self.floor_z_margin      = float(floor_z_margin)
+        self.kp_joints           = np.array([1.0, 1.0, 1.0, 1.0, 2.0, 1.0], dtype=float)
+        # ^^ Make wrist joint 5 more responsive so we don't have the issues with lagging
 
         # ---------------------------------------------------------------------
         # 1) Parse URDF and build KDL chain
@@ -162,11 +238,14 @@ class VelocityController:
         self._wait_for_joint_state()
         rospy.loginfo("[VC] Ready.")
 
+        # current_tip_pos = self.
+        # rospyloginfo(f"[VC] ")
+
     # =====================================================================
     #   PUBLIC API
     # =====================================================================
 
-    def move_to_joint_positions(self, q_target, timeout=5.0, kp=2.0, tol=1e-3):
+    def move_to_joint_positions(self, q_target, timeout=5.0, kp=2.0, tol=1e-3, bypass_floor=False):
         """
         Drive joints to q_target using a simple velocity P-controller.
 
@@ -175,6 +254,7 @@ class VelocityController:
         timeout:  seconds before giving up.
         kp:       proportional gain [rad/s per rad error].
         tol:      norm of joint error to consider 'done'.
+        bypass_floor: if True, bypass the floor_z safety check.
         """
         q_target = np.asarray(q_target, dtype=float)
         if q_target.shape != (self.nj,):
@@ -183,7 +263,16 @@ class VelocityController:
                 f"Joint order is: {self.joint_names}"
             )
 
-        _start_egm()
+        # ---------- SAFETY: check floor_z constraint ----------
+        if self._tip_position(q_target)[2] < self.floor_z_margin:
+            raise RuntimeError(
+                f"[VC] Refusing move_to_joint_positions to target {q_target}"
+                f" because fingertip Z would be below floor limit "
+            )
+        # ------------------------------------------------------
+
+
+        _start_egm_wait_till_active()
         rospy.sleep(0.5)
 
         start_time = rospy.Time.now()
@@ -191,7 +280,8 @@ class VelocityController:
 
         while not rospy.is_shutdown():
             if (rospy.Time.now() - start_time).to_sec() > timeout:
-                rospy.logwarn("[VC] move_to_joint_positions timed out.")
+                rospy.logwarn(f"[VC] move_to_joint_positions timed out."
+                              f"\nWith error: {q_target - q_curr}")
                 break
 
             with self._state_lock:
@@ -205,13 +295,35 @@ class VelocityController:
                 rospy.loginfo("[VC] Joint target reached.")
                 break
 
-            q_dot_cmd = kp * err
+            # q_dot_cmd = kp * err
+            temp_kp_joints = np.array([2.0, 2.0, 2.0, 2.0, 6.0, 2.0], dtype=float)
+            vel_raw = temp_kp_joints * err
+
+
+            max_abs = float(np.max(np.abs(vel_raw)))
+            if max_abs > self.max_joint_vel:
+                scale = self.max_joint_vel / max_abs
+                vel_raw *= scale
+
+            q_dot_cmd = vel_raw
 
             # TEMP Let's see what joint commands are being calced
-            rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd: {np.round(q_dot_cmd, 3)}")
+            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd: {np.round(q_dot_cmd, 3)}")
 
             # Joint-limit avoidance (very simple clamp near limits)
             q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
+
+            if not bypass_floor:
+                # -------------- SAFETY: check floor_z constraint ----------
+                q_next = q_curr + q_dot_cmd * self.dt
+                if self._tip_position(q_next)[2] < self.floor_z_margin:
+                    rospy.logwarn_throttle(
+                        1.0,
+                        f"[VC] Joint command would move fingertip BELOW floor {self.floor_z_margin} limit."
+                        f" Zeroing velocities."
+                    )
+                    q_dot_cmd[:] = 0.0
+                # ---------------------------------------------------------
 
             # Saturate joint velocities
             q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
@@ -223,10 +335,10 @@ class VelocityController:
         self._publish_velocity(np.zeros(self.nj))
 
         rospy.sleep(0.5)
-        _stop_egm()
+        _stop_egm_wait_till_active()
         return True
 
-    def cartesian_velocity(self, v, w, duration):
+    def cartesian_velocity(self, v, w, duration, arm_logs=False, k_safe=None):
         """
         Apply a constant Cartesian twist for 'duration' seconds.
 
@@ -240,7 +352,7 @@ class VelocityController:
 
         rospy.loginfo(f"[VC] cartesian_velocity v={v}, w={w}, duration={duration}")
 
-        _start_egm()
+        _start_egm_wait_till_active()
         rospy.sleep(0.5)
 
         start_time = rospy.Time.now()
@@ -259,13 +371,29 @@ class VelocityController:
             q_dot_cmd = self._ik_velocity(q_curr, twist_np)
 
             # TEMP Let's see what joint commands are being calced
-            rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd: {np.round(q_dot_cmd, 3)}")
+            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd from ik_solver:\n {np.round(q_dot_cmd, 3)}")
 
             # Joint-limit avoidance
             q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
+            # TEMP Let's see what joint commands are being calced
+            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd after joint limit avoidance:\n {np.round(q_dot_cmd, 3)}")
+
+            # -------------- SAFETY: check floor_z constraint ----------
+            q_next = q_curr + q_dot_cmd * self.dt
+            if self._tip_position(q_next)[2] < self.floor_z_margin:
+                rospy.logwarn_throttle(
+                    1.0,
+                    f"[VC] Joint command would move fingertip BELOW floor {self.floor_z_margin} limit."
+                    f" Zeroing velocities."
+                )
+                q_dot_cmd[:] = 0.0
+            # ---------------------------------------------------------
 
             # Clamp velocities
             q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
+            # TEMP Let's see what joint commands are being calced
+            # rospy.loginfo_throttle(1.0, f"[VC] q_dot_cmd after clamping:\n {np.round(q_dot_cmd, 3)}")
+
 
             self._publish_velocity(q_dot_cmd)
             self.rate.sleep()
@@ -274,7 +402,7 @@ class VelocityController:
         self._publish_velocity(np.zeros(self.nj))
 
         rospy.sleep(0.5)
-        _stop_egm()
+        _stop_egm_wait_till_active()
         return True
     
 
@@ -296,13 +424,15 @@ class VelocityController:
         q_sol = self._ik_position(xyz, rpy, q_seed=q_seed)
         rospy.loginfo(f"[VC] compute_ik -> {q_sol}")
         return q_sol
-    
+
 
     def move_to_pose(self, xyz, rpy, timeout=5.0, kp=2.0, tol=1e-3, q_seed=None):
         """
         Solve IK for (xyz, rpy) and then move there using move_to_joint_positions.
 
         xyz, rpy: pose in BASE frame.
+
+        **************************************** UNTESTED UNTESTED UNTESTED *********************************************
         """
         q_target = self.compute_ik(xyz, rpy, q_seed=q_seed)
         return self.move_to_joint_positions(
@@ -452,3 +582,17 @@ class VelocityController:
         for i in range(self.nj):
             q_sol[i] = q_sol_kdl[i]
         return q_sol
+    
+
+    def _fk_position(self, q_np):
+        """FK to the current tip Frame (now finger_tip)"""
+        q_kdl = self._to_kdl_jnt_array(q_np)
+        F = kdl.Frame()
+        self.fk_solver.JntToCart(q_kdl, F)
+        return F
+    
+    def _tip_position(self, q_np):
+        """Get the current fingertip position in BASE frame as np.array [x,y,z]."""
+        F_tip = self._fk_position(q_np)
+        p = F_tip.p
+        return np.array([p[0], p[1], p[2]])

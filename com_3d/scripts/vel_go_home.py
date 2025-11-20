@@ -16,12 +16,15 @@ X_OFFSET_FINGER = 0.08225+ 0.11 # X readings are ~192.25 mm 'less' than expected
 def main():
     rospy.init_node("go_home")
 
-    temp = VelocityController(max_joint_vel=1.0)
+    ctrl = VelocityController(max_joint_vel=1.0)
 
     rospy.loginfo("[go_home] Moving robot to home position using velocity control...")
-    # motion_success = temp.cartesian_velocity(v=[0.01, 0, 0], w=[0, 0, 0], duration=2.0)
-    motion_success = temp.move_to_joint_positions([0, 0, 0, 0, 0, 0])
-    # motion_success = temp.move_to_joint_positions([0, 0.615, 0.867, 0, -1.482, 0], timeout=20.0) # we know this is prepush pose for "box"
+    # motion_success = ctrl.cartesian_velocity(v=[0, 0, -0.01], w=[0, 0, 0], duration=2.0)
+    motion_success = ctrl.move_to_joint_positions(
+        [0, 0, 0, 0, 0, 0], 
+        timeout=15.0,
+        bypass_floor=True
+        )
     
     if not motion_success:
         rospy.logerr("[go_home] Home motion failed!")
