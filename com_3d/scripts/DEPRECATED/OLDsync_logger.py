@@ -5,19 +5,16 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import WrenchStamped, TransformStamped
 from apriltag_ros.msg import AprilTagDetectionArray
-from std_msgs.msg import Empty, Bool
-from datetime import datetime
+from std_msgs.msg import Empty
+import tf2_ros
 from tf.transformations import euler_from_quaternion
 
 # For KDL TF lookups since TF is broken...
-from sensor_msgs.msg import JointState
-from urdf_parser_py.urdf import URDF
-from kdl_parser_py.urdf import treeFromUrdfModel
-import PyKDL as kdl
 
 
 WARMUP_FRAMES_DEFAULT = 10
 FPS_HINT_DEFAULT = 30
+FOURCC = cv2.VideoWriter_fourcc(*'mp4v')
 
 class FTClockLogger:
     """
@@ -28,11 +25,13 @@ class FTClockLogger:
     IT CURRENTLY USES THE HIGHEST_FREQUENCY DATASTREAM AS THE CLOCK (FT SENSOR)
     """
     def __init__(self):
-        self.run_base   = rospy.get_param('~run_base', None)
+        self.run_base   = rospy.get_param('~run_base')
         self.base_frame = rospy.get_param('~base_frame', 'base_link')
         self.ee_frame   = rospy.get_param('~ee_frame',   'finger_tip')
         # --- params for topics ---
         self.ft_stream_topic    = rospy.get_param('~ft_topic',   '/netft_data_transformed')
+        self.ft_contact_topic   = rospy.get_param('~ft_contact_topic', '/com_3d/fw_contact')
+        self.ft_trigger_topic   = rospy.get_param('~ft_trigger_topic', '/com_3d/fw_trigger')
         self.tag_topic          = rospy.get_param('~dets_topic_name', '/tag_detections')
         self.image_topic        = rospy.get_param('~image_topic', '/tag_detections_image')  # overlay from apriltag_ros
         # --- params for tag detections + video ---
@@ -40,9 +39,7 @@ class FTClockLogger:
         self.flush_period   = float(rospy.get_param('~flush_period', 0.25))
         self.fps_hint       = float(rospy.get_param('~fps_hint', FPS_HINT_DEFAULT))
         # self.warmup_frames  = int(rospy.get_param('~warmup_frames', WARMUP_FRAMES_DEFAULT))
-        self.last_flush     = rospy.Time.now().to_sec()
 
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         pkg = rospkg.RosPack().get_path('com_3d')
         self.out_dir = os.path.join(pkg, 'experiments'); os.makedirs(self.out_dir, exist_ok=True)
@@ -61,61 +58,53 @@ class FTClockLogger:
         # FT state (contact, triggered, etc.)
         self.ft_contact_flag = 0
         self.ft_trigger_flag = 0
+        rospy.Subscriber(self.ft_contact_topic, Empty, self._on_fw_contact)
+        rospy.Subscriber(self.ft_trigger_topic, Empty, self._on_fw_trigger)
 
         # latest tag (sample-and-hold; no interp)
         self.tag_latest = {'t': None, 'id': None,
                                'rpy': (None, None, None),
                                'txyz': (None, None, None)}
-
-        # --- KDL FK for EE pose (base_link -> finger_tip) ---
-        robot = URDF.from_parameter_server('robot_description')
-        ok, tree = treeFromUrdfModel(robot)
-        if not ok:
-            rospy.logerr("[ft_clock_logger] Failed to build KDL tree from URDF.")
-            raise RuntimeError("KDL tree error")
-
-        self.chain = tree.getChain(self.base_frame, self.ee_frame)
-        self.fk_solver = kdl.ChainFkSolverPos_recursive(self.chain)
-        self.nj = self.chain.getNrOfJoints()
-
-        # Joint names in KDL order (only movable joints)
-        self.kdl_joint_names = []
-        for i in range(self.chain.getNrOfSegments()):
-            seg = self.chain.getSegment(i)
-            jnt = seg.getJoint()
-            # In PyKDL Python, easiest check:
-            if jnt.getTypeName() != "None":
-                self.kdl_joint_names.append(jnt.getName())
-
-        self._q_lock = Lock()
-        self._q = None  # latest joint positions in KDL order
-        self.ee_last = [0.0] * 7  # fallback EE pose
+        
+        # TF buffer (TF handles any needed interp internally)
+        self.tfbuf = tf2_ros.Buffer(cache_time=rospy.Duration(30.0))
+        self.tfl   = tf2_ros.TransformListener(self.tfbuf)
+        self.tf_timeout_sec = float(rospy.get_param('~tf_timeout_sec', 0.03)) # 30 ms
+        # best-effort prime of ee_last using latest TF, so first row isn't NaN
+        try:
+            ts = self.tfbuf.lookup_transform(self.base_frame, self.ee_frame,
+                                            rospy.Time(0), rospy.Duration(0.03))
+            self.ee_last = [
+                ts.transform.translation.x,
+                ts.transform.translation.y,
+                ts.transform.translation.z,
+                ts.transform.rotation.x,
+                ts.transform.rotation.y,
+                ts.transform.rotation.z,
+                ts.transform.rotation.w,
+            ]
+        except Exception as e:
+            rospy.logwarn(f"Failed to lookup initial transform from {self.base_frame} to {self.ee_frame}: {e}")
+            # leave ee_last as zeros
+            self.ee_last = [0, 0, 0, 0, 0, 0, 0]
+            pass
         
 
-        rospy.Subscriber(self.ft_stream_topic, WrenchStamped, self._on_ft, queue_size=500)
         rospy.Subscriber(self.tag_topic, AprilTagDetectionArray, self._on_tag, queue_size=50)
+        rospy.Subscriber(self.ft_stream_topic,  WrenchStamped,          self._on_ft,  queue_size=500)
         rospy.Subscriber('/com_3d/log_start', Empty, self._start, queue_size=1)
         rospy.Subscriber('/com_3d/log_stop',  Empty, self._stop,  queue_size=1)
-        rospy.Subscriber('/com_3d/fw_contact_status', Bool, self._on_fw_contact)
-        rospy.Subscriber('/com_3d/fw_trigger_status', Bool, self._on_fw_trigger)
         # --- image subscriber (buffered) ---
-        rospy.Subscriber(self.image_topic, Image, self._on_image, queue_size=10, buff_size=2**24)
-        rospy.Subscriber("/egm/joint_states", JointState, self._on_joint_state, queue_size=100)
-        
+        self.img_sub = rospy.Subscriber(self.image_topic, Image, self._on_image, 
+                                        queue_size=10, buff_size=2**24)
 
     def _start(self, _):
         with self.lock:
             if self.recording: return
             self.traj_idx += 1
-            # Build a base name from datetime + object name
-            object_name = rospy.get_param('/com_3d/object_name', 'unknown')
-            base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
-            stem = f"{base}_t{self.traj_idx:02d}"
-
-            # stem = f"{self.run_base}_t{self.traj_idx:03d}_SYNC"
+            stem = f"{self.run_base}_t{self.traj_idx:03d}_SYNC"
             path = os.path.join(self.out_dir, stem + ".csv")
             self.video_path = os.path.join(self.out_dir, stem + ".mp4")
-            
             self.csv_f = open(path, 'w', newline='')
             self.csv_w = csv.writer(self.csv_f)
             self.csv_w.writerow([
@@ -188,7 +177,7 @@ class FTClockLogger:
             # Lazy-open writer with the first frame’s size
             if self.writer is None:
                 h, w = frame.shape[:2]
-                self.writer = cv2.VideoWriter(self.video_path, cv2.VideoWriter_fourcc(*'mp4v'), self.fps_hint, (w, h), True)
+                self.writer = cv2.VideoWriter(self.video_path, FOURCC, self.fps_hint, (w, h), True)
                 if not self.writer.isOpened():
                     rospy.logerr("[ft_clock_logger] Failed to open VideoWriter for %s", self.video_path)
                     # Don’t abort logging; just skip video
@@ -228,27 +217,26 @@ class FTClockLogger:
                 return
 
         # EE pose at tag time; on failure, hold last good
-        # ee = [float('nan')]*7
-        # try:
-        #     ts: TransformStamped = self.tfbuf.lookup_transform(
-        #         self.base_frame, self.ee_frame,
-        #         rospy.Time.from_sec(t), rospy.Duration(self.tf_timeout_sec)
-        #     )
-        #     ee = [
-        #         ts.transform.translation.x,
-        #         ts.transform.translation.y,
-        #         ts.transform.translation.z,
-        #         ts.transform.rotation.x,
-        #         ts.transform.rotation.y,
-        #         ts.transform.rotation.z,
-        #         ts.transform.rotation.w,
-        #     ]
-        #     self.ee_last = ee[:]
-        # except Exception as e:
-        #     rospy.logwarn(f"Failed to lookup transform from {self.base_frame} to {self.ee_frame} at time {t}: {e}")
-        #     if self.ee_last is not None:
-        #         ee = self.ee_last[:]
-        ee = self._get_latest_ee()
+        ee = [float('nan')]*7
+        try:
+            ts: TransformStamped = self.tfbuf.lookup_transform(
+                self.base_frame, self.ee_frame,
+                rospy.Time.from_sec(t), rospy.Duration(self.tf_timeout_sec)
+            )
+            ee = [
+                ts.transform.translation.x,
+                ts.transform.translation.y,
+                ts.transform.translation.z,
+                ts.transform.rotation.x,
+                ts.transform.rotation.y,
+                ts.transform.rotation.z,
+                ts.transform.rotation.w,
+            ]
+            self.ee_last = ee[:]
+        except Exception as e:
+            rospy.logwarn(f"Failed to lookup transform from {self.base_frame} to {self.ee_frame} at time {t}: {e}")
+            if self.ee_last is not None:
+                ee = self.ee_last[:]
 
 
         # Write row (tag_visible=1 because we write only when a tag exists)
@@ -271,58 +259,12 @@ class FTClockLogger:
                 self.csv_f.flush(); self.last_flush = now
 
     
-    def _on_fw_contact(self, msg: Bool):
+    def _on_fw_contact(self, msg: Empty):
         with self.lock:
-            if msg.data:
-                self.ft_contact_flag = 1
-    def _on_fw_trigger(self, msg: Bool):
+            self.ft_contact_flag = 1
+    def _on_fw_trigger(self, msg: Empty):
         with self.lock:
-            if msg.data:
-                self.ft_trigger_flag = 1
-    def _on_joint_state(self, msg: JointState):
-        """Maintain latest joint vector in KDL joint order."""
-        name_to_pos = {n: p for n, p in zip(msg.name, msg.position)}
-
-        q = []
-        for jn in self.kdl_joint_names:
-            if jn not in name_to_pos:
-                # Incomplete; skip this message
-                return
-            q.append(name_to_pos[jn])
-
-        with self._q_lock:
-            self._q = q
-
-    def _get_latest_ee(self):
-        """EE pose via KDL FK using latest joint state"""
-        with self._q_lock:
-            q_curr = None if self._q is None else list(self._q)
-
-        if q_curr is not None and len(q_curr) == self.nj:
-            try:
-                q_kdl = kdl.JntArray(self.nj)
-                for i, v in enumerate(q_curr):
-                    q_kdl[i] = v
-
-                F = kdl.Frame()
-                self.fk_solver.JntToCart(q_kdl, F)
-
-                p = F.p
-                qx, qy, qz, qw = F.M.GetQuaternion()
-
-                ee = [p[0], p[1], p[2], qx, qy, qz, qw]
-                self.ee_last = ee[:]
-            except Exception as e:
-                rospy.logwarn_throttle(
-                    1.0,
-                    f"[ft_clock_logger] FK failed, using last EE pose: {e}"
-                )
-                ee = self.ee_last[:]
-        else:
-            # No valid joint state yet; use last known EE pose
-            ee = self.ee_last[:]
-
-        return ee
+            self.ft_trigger_flag = 1
 
         
 

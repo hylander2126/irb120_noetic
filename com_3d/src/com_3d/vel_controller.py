@@ -268,7 +268,7 @@ class VelocityController:
         start_time = rospy.Time.now()
         rospy.loginfo(f"[VC] move_to_joint_positions:\n{q_target}")
 
-        early_stop_reason = None # For logging
+        stop_reason = None
 
         while not rospy.is_shutdown():
             if (rospy.Time.now() - start_time).to_sec() > timeout:
@@ -285,6 +285,7 @@ class VelocityController:
             err = q_target - q_curr
             if np.linalg.norm(err) < tol:
                 rospy.loginfo("[VC] Joint target reached.")
+                stop_reason = "success"
                 break
 
             # q_dot_cmd = kp * err
@@ -305,7 +306,7 @@ class VelocityController:
             # -------------- SAFETY: check floor_z constraint ----------
             if not bypass_floor and not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt): # q_next
                 rospy.logwarn_throttle(1.0, f"[VC] Next joint q violates floor constraint: {self.floor_z_margin}. Zeroing velocities.")
-                early_stop_reason = "floor_z constraint violated."
+                stop_reason = "floor_z constraint violated."
                 break
             # ---------------------------------------------------------
 
@@ -319,7 +320,7 @@ class VelocityController:
         self._publish_velocity(np.zeros(self.nj))
         rospy.sleep(0.5)
         _stop_egm_wait_till_active()
-        return True if early_stop_reason is None else False
+        return True if stop_reason == "success" else False
 
     def cartesian_velocity(self, v, w, duration, arm_logs=False, k_safe=None):
         """

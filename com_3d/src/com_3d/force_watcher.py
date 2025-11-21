@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import rospy
 from geometry_msgs.msg import WrenchStamped
+from std_msgs.msg import Empty
+from std_msgs.msg import Bool
 import numpy as np
 
 # ----------------------- force monitor -----------------------
@@ -53,17 +55,21 @@ class ForceWatcher:
         self.contact_count = 0
         self.below_count = 0
 
-        self.sub = rospy.Subscriber(ft_topic, WrenchStamped, self.ft_cb, queue_size=50)
+        self.sub_ft = rospy.Subscriber(ft_topic, WrenchStamped, self.ft_cb, queue_size=50)
+
+        # The following publishers are so that logging can record when contact and trigger occurs
+        self.pub_contact = rospy.Publisher('/com_3d/fw_contact_status', Bool, queue_size=1, latch=True)
+
+        ### THIS IS UNUSED RIGHT NOW SINCCE WE JUST STOP MOTION UPON TRIGGER... ####
+        self.pub_trigger = rospy.Publisher('/com_3d/fw_trigger_status', Bool, queue_size=1, latch=True)
 
         # Looks like lshape (lightest) has peaks F: 0.117 -> 0.128 -> 0.248 -> 0.331
         # This is lower than our 
 
     def ft_cb(self, msg):
-        # If triggered (motion stopped), unregister the subscriber and callback
-        if self.trigger:
-            rospy.loginfo("[ForceWatcher] Triggered; unsubscribing from FT topic.")
-            self.sub.unregister()
-            return
+        # Publish contact and trigger events continuously
+        self.pub_contact.publish(self.STATE == "CONTACT")
+        self.pub_trigger.publish(self.trigger)
 
         fx, fy, fz = msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z
         f = np.linalg.norm([fx, fy, fz])
@@ -126,6 +132,7 @@ class ForceWatcher:
                 self.peak = float(np.max(self.peak_buf))
                 self.debug_msg(f"Peak force recorded: {self.peak:.3f} N")
                 self.STATE = "CONTACT"
+                # self.pub_contact.publish(Empty())
 
 
         # ------------ 3) CONTACT / PEAK TRACING ------------
@@ -152,7 +159,9 @@ class ForceWatcher:
                         self.STATE = "TRIGGERED"
                         self.trigger = True
                         self.debug_msg(f"Stop triggered(peak: {self.peak:.3f} N, threshold: {thresh:.3f} N, current: {f_med:.3f} N).")
-                        self.sub.unregister()
+                        # self.pub_trigger.publish(Empty())
+                        # Unsubscribe from FT topic to stop further processing
+                        self.sub_ft.unregister()
                 else:
                     self.below_count = 0
         
@@ -168,6 +177,3 @@ class ForceWatcher:
                 rospy.loginfo_once(f"[ForceWatcher] {msg}")
             else:
                 rospy.loginfo_throttle(throttle, f"[ForceWatcher] {msg}")
-
-    def exit_fw(self):
-        self.sub.unregister()

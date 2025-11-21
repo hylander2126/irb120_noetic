@@ -158,18 +158,14 @@ include_directories(
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
+  scripts/egm_handler.py
   scripts/egm_settings_and_jtc_init.py
-  scripts/shutdown_handler.py
-  scripts/transform_netft.py
-  scripts/sync_logger.py
-  scripts/go_forward.py
   scripts/go_home.py
-  scripts/go_prep.py
   scripts/move.py
-  scripts/egm_vel_apply.py
+  scripts/sync_logger.py
+  scripts/transform_netft.py  
   scripts/vel_go_home.py
   scripts/vel_move.py
-  scripts/egm_vel_apply.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
@@ -201,13 +197,15 @@ catkin_install_python(PROGRAMS
 #   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 # )
 
-install(DIRECTORY launch config
+install(DIRECTORY 
+  launch 
+  config
+  urdf
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
 
-install(PROGRAMS
-  scripts/startup_robot.sh
-  DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-)
+# install(PROGRAMS
+#   DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+# )
 
 #############
 ## Testing ##
