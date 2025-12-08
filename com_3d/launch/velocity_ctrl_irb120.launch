@@ -38,7 +38,7 @@
   <!-- ############################### -->
 
   <include file="$(find com_3d)/launch/live_netft.launch">
-      <arg name="apply_transform" value="true"/>
+      <arg name="apply_transform" value="false"/> <!-- TRUE -->
       <arg name="apply_bias" value="true"/>
     </include>
 

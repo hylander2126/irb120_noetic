@@ -17,20 +17,16 @@
         args="--address 192.168.126.125"/>
 
 <!-- Transform the /netft_data topic and publish at /netft_data_transformed -->
-    <node if="$(arg apply_transform)" pkg="com_3d" type="transform_netft.py" name="transform_netft" output="screen">
+    <node pkg="com_3d" type="transform_netft.py" name="transform_netft" output="screen">
         <param name="input_topic" value="/netft_data"/>
         <param name="output_topic" value="/netft_data_transformed"/>
         <param name="apply_bias" value="$(arg apply_bias)"/>
+        <param name="apply_transform" value="$(arg apply_transform)"/>
     </node>
 
-<!-- Based on IF apply_transform, plot either raw or transformed data -->
-
-    <node if="$(eval arg('live_rqt') and arg('apply_transform'))"
-        pkg="rqt_plot" type="rqt_plot" name="rqt_plot_transformed" output="screen"
+<!-- Regardless, use the netft_data_transformed topic for plotting -->
+    <node if="$(arg live_rqt)"
+        pkg="rqt_plot" type="rqt_plot" name="rqt_plot_force" output="screen"
         args="/netft_data_transformed/wrench/force"/>
-
-    <node unless="$(eval arg('live_rqt') and arg('apply_transform'))"
-        pkg="rqt_plot" type="rqt_plot" name="rqt_plot_original" output="screen"
-        args="/netft_data/wrench/force"/>
     
 </launch>

@@ -15,6 +15,7 @@ class FTTransformer:
         self.input_topic    = rospy.get_param('~input_topic', '/netft_data')
         self.output_topic   = rospy.get_param('~output_topic', '/netft_data_transformed')
         self.apply_bias     = rospy.get_param('~apply_bias', True)
+        self.apply_transform= rospy.get_param('~apply_transform', True)
         self.bias_samples   = 150
 
         # HACK: Use a static rotation for our specific setup
@@ -88,9 +89,13 @@ class FTTransformer:
             f_final -= self.bias_f
             t_final -= self.bias_t
 
-        # Apply fixed transform:
-        transformed_F = self.R @ f_final
-        transformed_T = self.R @ t_final
+        if self.apply_transform:
+            # Apply fixed transform:
+            transformed_F = self.R @ f_final
+            transformed_T = self.R @ t_final
+        else:
+            transformed_F = f_final
+            transformed_T = t_final
 
         # Publish using the same exact message type
         out = WrenchStamped()

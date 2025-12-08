@@ -25,6 +25,7 @@ class ForceWatcher:
         ):
         self.k_safe = k_safe
         self.debug = debug
+        self.min_force_close_zero = 0.04 # N below this is basically zero, robot jerks at first this avoids an early stop
 
         # Baseline / noise estimation
         self.baseline_buf = [0.0] * baseline_window # prepare empty buffer
@@ -69,7 +70,7 @@ class ForceWatcher:
     def ft_cb(self, msg):
         # Publish contact and trigger events continuously
         self.pub_contact.publish(self.STATE == "CONTACT")
-        self.pub_trigger.publish(self.trigger)
+        self.pub_trigger.publish(self.STATE == "TRIGGERED")
 
         fx, fy, fz = msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z
         f = np.linalg.norm([fx, fy, fz])
@@ -110,7 +111,8 @@ class ForceWatcher:
                 df = f_med - prev_med # current (smoothed) minus previous
             
             cond1 = (f_med-self.noise_floor) > self.contact_delta
-            cond2 = True # TEMP DISABLING     df > self.contact_slope:
+            # cond2 = True # TEMP DISABLING     df > self.contact_slope:
+            cond2 = f_med > self.min_force_close_zero # TEMP testing to avoid tiny forces (robot jerk) detecting as contact
             if cond1 and cond2:
                 self.contact_count += 1
                 self.debug_msg(f"""Contact magnitude met: f_med={f_med:.3f} N, (contact_delta={self.contact_delta:.3f})""") if cond1 else None
@@ -157,10 +159,9 @@ class ForceWatcher:
                                 f"({self.below_count}/{self.fall_samples})", 1.0)
                     if self.below_count >= self.fall_samples:
                         self.STATE = "TRIGGERED"
+                        self.pub_trigger.publish(1)
                         self.trigger = True
                         self.debug_msg(f"Stop triggered(peak: {self.peak:.3f} N, threshold: {thresh:.3f} N, current: {f_med:.3f} N).")
-                        # self.pub_trigger.publish(Empty())
-                        # Unsubscribe from FT topic to stop further processing
                         self.sub_ft.unregister()
                 else:
                     self.below_count = 0

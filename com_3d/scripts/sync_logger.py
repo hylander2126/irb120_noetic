@@ -132,6 +132,8 @@ class FTClockLogger:
             # reset video state
             self.writer = None
             # self.frames_seen = 0
+            self.ft_contact_flag = 0
+            self.ft_trigger_flag = 0
         rospy.loginfo("[ft_clock_logger] START -> %s", path)
 
     def _stop(self, _):
@@ -275,10 +277,12 @@ class FTClockLogger:
         with self.lock:
             if msg.data:
                 self.ft_contact_flag = 1
+
     def _on_fw_trigger(self, msg: Bool):
         with self.lock:
             if msg.data:
                 self.ft_trigger_flag = 1
+
     def _on_joint_state(self, msg: JointState):
         """Maintain latest joint vector in KDL joint order."""
         name_to_pos = {n: p for n, p in zip(msg.name, msg.position)}
