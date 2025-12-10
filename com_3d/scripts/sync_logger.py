@@ -63,9 +63,9 @@ class FTClockLogger:
         self.ft_trigger_flag = 0
 
         # latest tag (sample-and-hold; no interp)
-        self.tag_latest = {'t': None, 'id': None,
-                               'rpy': (None, None, None),
-                               'txyz': (None, None, None)}
+        self.tag_latest = None #{'t': None, 'id': None,
+                               #'rpy': (None, None, None),
+                               #'txyz': (None, None, None)}
 
         # --- KDL FK for EE pose (base_link -> finger_tip) ---
         robot = URDF.from_parameter_server('robot_description')
@@ -232,27 +232,6 @@ class FTClockLogger:
             if not self.recording or self.csv_w is None:
                 return
 
-        # EE pose at tag time; on failure, hold last good
-        # ee = [float('nan')]*7
-        # try:
-        #     ts: TransformStamped = self.tfbuf.lookup_transform(
-        #         self.base_frame, self.ee_frame,
-        #         rospy.Time.from_sec(t), rospy.Duration(self.tf_timeout_sec)
-        #     )
-        #     ee = [
-        #         ts.transform.translation.x,
-        #         ts.transform.translation.y,
-        #         ts.transform.translation.z,
-        #         ts.transform.rotation.x,
-        #         ts.transform.rotation.y,
-        #         ts.transform.rotation.z,
-        #         ts.transform.rotation.w,
-        #     ]
-        #     self.ee_last = ee[:]
-        # except Exception as e:
-        #     rospy.logwarn(f"Failed to lookup transform from {self.base_frame} to {self.ee_frame} at time {t}: {e}")
-        #     if self.ee_last is not None:
-        #         ee = self.ee_last[:]
         ee = self._get_latest_ee()
 
 
@@ -261,7 +240,6 @@ class FTClockLogger:
             if not self.recording or self.csv_w is None:
                 return
             
-            rospy.loginfo(f"[ft_clock_logger] tag: {tag}")
             if tag is not None:
                 trpy = tag['rpy']
                 txyz = tag['txyz']

@@ -94,7 +94,7 @@ def set_egm_settings():
     # Desired targets (adjust if you want):
     MAX_SPEED_DEV_RAD = 1.50 # rad/s
     COMM_TIMEOUT      = 5.00 # sec
-    RAMP_IN_TIME      = 0.25 # sec # Was 0.1 then 4.0
+    RAMP_IN_TIME      = 2.0 # sec # Was 0.1 then 4.0
     RAMP_OUT_TIME     = 0.25 # sec # Was 0.1
 
     try:

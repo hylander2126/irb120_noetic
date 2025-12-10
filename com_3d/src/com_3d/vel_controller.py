@@ -133,7 +133,6 @@ class VelocityController:
         self.max_joint_vel       = float(max_joint_vel)
         self.joint_safety_margin = float(joint_safety_margin)
         self.floor_z_margin      = float(floor_z_margin)
-        self.kp_joints           = np.array([1.0, 1.0, 1.0, 1.0, 2.0, 1.0], dtype=float)
         # ^^ Make wrist joint 5 more responsive so we don't have the issues with lagging
         self.last_cartesian_stop_reason = None
         self.last_cartesian_duration    = None
@@ -232,7 +231,7 @@ class VelocityController:
 
         rospy.loginfo("[VC] Waiting for first joint state...")
         self._wait_for_joint_state()
-        rospy.loginfo("[VC] Ready.")
+        rospy.loginfo("[VC] Joint State Found! Ready.")
 
 
     # =====================================================================
@@ -264,6 +263,21 @@ class VelocityController:
             )
         # ------------------------------------------------------
 
+        kp_joints = np.array([4.0, 4.0, 4.0, 4.0, 6.0, 4.0], dtype=float)
+        ki_joints = np.array([0.4, 0.4, 0.4, 0.4, 0.6, 0.4], dtype=float)
+        kd_joints = np.array([0.01, 0.01, 0.01, 0.01, 0.02, 0.01], dtype=float)
+
+        # kp_joints = np.array([2.0, 2.0, 2.0, 2.0, 6.0, 2.0], dtype=float)
+        # ki_joints = np.array([0.2, 0.2, 0.2, 0.2, 0.6, 0.2], dtype=float)
+        # kd_joints = np.array([0.01, 0.01, 0.01, 0.01, 0.02, 0.01], dtype=float)
+
+        # PID State
+        err_prev = np.zeros(self.nj, dtype=float)
+        err_I = np.zeros(self.nj, dtype=float)
+
+        # Integral anti-windup limits
+        I_MAX = np.full(self.nj, 0.5, dtype=float)  # rad*sec
+
         _start_egm_wait_till_active()
         rospy.sleep(0.5)
 
@@ -272,8 +286,12 @@ class VelocityController:
 
         stop_reason = None
 
+        ## =========================== MOTION LOOP ============================
         while not rospy.is_shutdown():
-            if (rospy.Time.now() - start_time).to_sec() > timeout:
+            now = rospy.Time.now()
+            elapsed = (now - start_time).to_sec()
+
+            if elapsed > timeout:
                 rospy.logwarn(f"[VC] move_to_joint_positions timed out. Joint errors:\n"
                               f"{q_target - q_curr}, norm={np.linalg.norm(q_target - q_curr)}")
                 break
@@ -284,18 +302,29 @@ class VelocityController:
                 self.rate.sleep()
                 continue
 
+            # Compute error
             err = q_target - q_curr
-            if np.linalg.norm(err) < tol:
-                rospy.loginfo("[VC] Joint target reached.")
+            err_norm = float(np.linalg.norm(err))
+
+            # Check for convergence
+            if err_norm < tol:
+                rospy.loginfo("[VC] Joint target reached. Joint errors:\n"
+                              f"{q_target - q_curr}, norm={err_norm}")
                 stop_reason = "success"
                 break
 
-            # q_dot_cmd = kp * err
-            temp_kp_joints = np.array([2.0, 2.0, 2.0, 2.0, 6.0, 2.0], dtype=float)
-            temp_kp_joints = np.array([2.0, 2.0, 2.0, 2.0, 6.0, 2.0], dtype=float)
-            vel_raw = temp_kp_joints * err
+            # ----- PID control -----
+            # Integral and anti-windup
+            err_I += err * self.dt
+            err_I = np.clip(err_I, -I_MAX, I_MAX)
+            # Derivative
+            err_D = (err - err_prev) / self.dt
 
+            vel_raw = kp_joints * err + ki_joints * err_I + kd_joints * err_D
 
+            err_prev = err.copy()
+
+            # Enforce max joint velocity scaling
             max_abs = float(np.max(np.abs(vel_raw)))
             if max_abs > self.max_joint_vel:
                 scale = self.max_joint_vel / max_abs
@@ -318,6 +347,8 @@ class VelocityController:
 
             self._publish_velocity(q_dot_cmd)
             self.rate.sleep()
+
+        ## =========================== END MOTION LOOP ============================
 
         # Stop motion
         self._publish_velocity(np.zeros(self.nj))
@@ -352,12 +383,10 @@ class VelocityController:
                 q_curr = None if self._q is None else self._q.copy()
             if q_curr is None:
                 raise RuntimeError("[VC] No joint state available for orientation lock.")
-            _, rpy_des = self._tip_pose(q_curr)
+            _, M_des = self._tip_pose(q_curr)
             kp_orient = 1.0  # [rad/s per rad error]
 
-        
-        # _arm_logs() if arm_logs else None
-        rospy.sleep(0.5)
+        # rospy.sleep(0.5)
 
         start_time = rospy.Time.now()
 
@@ -365,7 +394,8 @@ class VelocityController:
 
         ## ============================ CARTESIAN MOTION LOOP ============================
         while not rospy.is_shutdown():
-            if (rospy.Time.now() - start_time).to_sec() > duration:
+            elapsed = (rospy.Time.now() - start_time).to_sec()
+            if elapsed > duration:
                 break
 
             with self._state_lock:
@@ -376,6 +406,11 @@ class VelocityController:
 
             # Check force watcher
             if force_watcher is not None:
+                if elapsed < 0.5: # Allow initial settling time
+                    force_watcher.STATE = "MONITOR" # FORCE the watcher back to monitoring state
+                    force_watcher.trigger = False
+                    force_watcher.contact_count = 0
+                    force_watcher.below_count = 0
                 # if force_watcher.STATE is None:
                 #     force_watcher.STATE = "BASELINE"  # start baseline if not already started
                 if force_watcher.trigger:
@@ -384,20 +419,26 @@ class VelocityController:
 
             # LOCK_ORIENT IS ONLY ENABLED UNDER LINEAR MOTION REQUESTS (no w desired)
             if lock_orient:
-                # Get current rpy
-                _, rpy_curr = self._tip_pose(q_curr)
+                # Get current Rot matrix
+                _, M_curr = self._tip_pose(q_curr)
                 # Simple orientation error (small- angle approx)
-                ori_err = rpy_des - rpy_curr
-                # Wrap into [-pi, pi] to avoid large jumps
-                ori_err = (ori_err + np.pi) % (2 * np.pi) - np.pi
+                # # Wrap into [-pi, pi] to avoid large jumps
+                err_R = M_curr.Inverse() * M_des
+
+                # Axis-angle representation
+                rot_vec = err_R.GetRot()
+
+                # Angular error vector e = theta * u
+                # err_ori = (ori_err + np.pi) % (2 * np.pi) - np.pi # Original with rpy
+                err_ori = np.array([rot_vec[0], rot_vec[1], rot_vec[2]])
                 
                 # Angluar velocity command to correct orientation error
-                w_cmd = kp_orient * ori_err # [wx, wy, wz]
+                w_cmd = kp_orient * err_ori # [wx, wy, wz]
 
-                rospy.loginfo(f"[VC] ori_err={ori_err}, w_cmd={w_cmd}")
-                # twist_cmd = np.concatenate([v, w_cmd])
+                rospy.loginfo(f"[VC] ori_err={err_ori}, w_cmd={w_cmd}")
+                twist_cmd = np.concatenate([v, w_cmd])
             else:
-                twist_cmd = twist_np
+                twist_cmd = twist_np.copy()
 
 
             # Compute joint velocities via KDL velocity IK
@@ -424,10 +465,8 @@ class VelocityController:
         self.last_cartesian_stop_reason = early_stop_reason
         self.last_cartesian_duration    = (rospy.Time.now() - start_time).to_sec()
 
-        rospy.sleep(0.1) # Sleep to ensure stop command is sent
+        # rospy.sleep(0.1) # Sleep to ensure stop command is sent
         _stop_egm_wait_till_active()
-
-        # _disarm_logs() if arm_logs else None
         
         if early_stop_reason is None:
             return True
@@ -437,9 +476,9 @@ class VelocityController:
         elif early_stop_reason=="force < f_safe.":
             rospy.loginfo(f"[VC] Stopped due to: {early_stop_reason}")
             return True
-        else:
-            rospy.logwarn(f"[VC] This should not happen. Stopped due to: {early_stop_reason}")
-            return True
+
+        rospy.logwarn(f"[VC] Shouldn't reach this point. Stopped due to: {early_stop_reason}")
+        return True
     
 
     def compute_ik(self, xyz, rpy, q_seed=None):
@@ -635,14 +674,13 @@ class VelocityController:
     
     def _tip_pose(self, q_np):
         """
-        Get the current fingertip pose (xyz, rpy) in BASE frame.
+        Get the current fingertip pose (xyz, M) in BASE frame.
         """
         F_tip = self._fk_position(q_np)
         p = F_tip.p
-        rr, rp, ry = F_tip.M.GetRPY()
         xyz = np.array([p[0], p[1], p[2]])
-        rpy = np.array([rr, rp, ry])
-        return xyz, rpy
+        # quat = F_tip.M.GetQuaternion()
+        return xyz, F_tip.M #quat
     
     def _floor_constraint_isok(self, q_np):
         """Return True if fingertip Z is above floor_z_margin.

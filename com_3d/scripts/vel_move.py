@@ -58,6 +58,7 @@ def main():
     DURATION    = 8.0 # seconds
     PUSH_SPEED  = 0.01 # m/s
     K_SAFE      = 0.5  # (1= topple, 0= None)
+    JOINT_TOL   = 4e-3 # rad
 
     # object_name = get_object_name()
     object_name = rospy.get_param("~object", None)
@@ -75,16 +76,15 @@ def main():
     ctrl = VelocityController(max_joint_vel=1.0)
     # Force watcher
     fw = ForceWatcher(
-        ft_topic="/netft_data_transformed",
         k_safe=K_SAFE,
-        debug=False,
+        debug=True,               # ENABLE DEBUGGING
         initial_state="BASELINE", # THIS WAS NONE BEFORE, and we set Baseline INSIDE the motion loop
     )
     rospy.sleep(0.25) # Let things settle for baseline collection
 
-    ## ========= BEGIN MOTION SEQUENCE ========= 
+    ## =================== BEGIN MOTION SEQUENCE ===================== 
     # 1) Move to pre-push pose
-    success_prep = ctrl.move_to_joint_positions(joint_pos, timeout=5.0, tol=8e-3)
+    success_prep = ctrl.move_to_joint_positions(joint_pos, timeout=8.0, tol=JOINT_TOL) # 8e-3)
     if not success_prep:
         rospy.logerr("[go_forward] Pre-push motion failed!")
         return
@@ -116,6 +116,7 @@ def main():
         v=[-PUSH_SPEED, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
         duration=ctrl.last_cartesian_duration, # NOW THIS USES THE ACTUAL LAST DURATION (return same distance)
+        lock_orient=False,
     )
     disarm_logs()  # Stop logging for push motion
     if not success_retract:
@@ -123,7 +124,7 @@ def main():
         return
 
     # SECOND PHASE: Go back to exact joint pose
-    success_return = ctrl.move_to_joint_positions(joint_pos, timeout=5.0, tol=8e-3)
+    success_return = ctrl.move_to_joint_positions(joint_pos, timeout=5.0, tol=JOINT_TOL)
     if not success_return:
         rospy.logerr("[go_forward] Return motion failed!")
     else:
