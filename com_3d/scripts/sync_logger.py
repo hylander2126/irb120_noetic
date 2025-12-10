@@ -164,6 +164,9 @@ class FTClockLogger:
         t = msg.header.stamp.to_sec() if msg.header.stamp else rospy.Time.now().to_sec()
 
         # single tag: take first detection
+        if len(msg.detections) < 1:
+            self.tag_latest = None
+            return
         det = msg.detections[0]
         p = det.pose.pose.pose
         q = [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w]
@@ -257,15 +260,24 @@ class FTClockLogger:
         with self.lock:
             if not self.recording or self.csv_w is None:
                 return
+            
+            rospy.loginfo(f"[ft_clock_logger] tag: {tag}")
+            if tag is not None:
+                trpy = tag['rpy']
+                txyz = tag['txyz']
+                tag_row = 1, tag['id'], 
+                f"{trpy[0]:.5f}", f"{trpy[1]:.5f}", f"{trpy[2]:.5f}", 
+                f"{txyz[0]:.5f}", f"{txyz[1]:.5f}", f"{txyz[2]:.5f}"
+            else:
+                tag_row = 0, "nan", "nan", "nan", "nan", "nan", "nan", "nan"
+                
             self.csv_w.writerow([
                 f"{t:.6f}",
-                f"{ft[0]:.9f}",  f"{ft[1]:.9f}",  f"{ft[2]:.9f}",
-                f"{ft[3]:.9f}",  f"{ft[4]:.9f}",  f"{ft[5]:.9f}",
-                f"{ee[0]:.9f}", f"{ee[1]:.9f}", f"{ee[2]:.9f}",
-                f"{ee[3]:.9f}", f"{ee[4]:.9f}", f"{ee[5]:.9f}", f"{ee[6]:.9f}",
-                1, int(tag['id']),
-                f"{tag['rpy'][0]:.9f}", f"{tag['rpy'][1]:.9f}", f"{tag['rpy'][2]:.9f}",
-                f"{tag['txyz'][0]:.9f}",   f"{tag['txyz'][1]:.9f}",    f"{tag['txyz'][2]:.9f}",
+                f"{ft[0]:.5f}",  f"{ft[1]:.5f}",  f"{ft[2]:.5f}",
+                f"{ft[3]:.5f}",  f"{ft[4]:.5f}",  f"{ft[5]:.5f}",
+                f"{ee[0]:.5f}", f"{ee[1]:.5f}", f"{ee[2]:.5f}",
+                f"{ee[3]:.5f}", f"{ee[4]:.5f}", f"{ee[5]:.5f}", f"{ee[6]:.5f}",
+                *tag_row,
                 self.ft_contact_flag, self.ft_trigger_flag
             ])
             now = rospy.Time.now().to_sec()

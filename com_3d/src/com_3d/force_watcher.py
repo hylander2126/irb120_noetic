@@ -25,7 +25,7 @@ class ForceWatcher:
         ):
         self.k_safe = k_safe
         self.debug = debug
-        self.min_force_close_zero = 0.04 # N below this is basically zero, robot jerks at first this avoids an early stop
+        self.min_force_close_zero = 0.14 # (was 0.03) N below this is basically zero, robot jerks at first this avoids an early stop
 
         # Baseline / noise estimation
         self.baseline_buf = [0.0] * baseline_window # prepare empty buffer
@@ -42,7 +42,7 @@ class ForceWatcher:
         self.contact_delta = 0.07  # N above baseline to declare contact (this is our resolution!)
         # ^ noise floor (empirical) appears to be 0.138 N
         self.contact_slope = 0.1  # N per sample increase to declare contact
-        self.contact_samples = 2  # 3 worked... consecutive samples needed for contact
+        self.contact_samples = 4  # 2 worked... 3 worked... consecutive samples needed for contact
 
         # Falling / trigger parameters
         self.fall_samples = 5     # consecutive samples needed for falling trigger
@@ -65,7 +65,9 @@ class ForceWatcher:
         self.pub_trigger = rospy.Publisher('/com_3d/fw_trigger_status', Bool, queue_size=1, latch=True)
 
         # Looks like lshape (lightest) has peaks F: 0.117 -> 0.128 -> 0.248 -> 0.331
-        # This is lower than our 
+        
+        rospy.loginfo(f"[VC] ForceWatcher armed with k_safe={self.k_safe}.")
+
 
     def ft_cb(self, msg):
         # Publish contact and trigger events continuously
@@ -81,10 +83,6 @@ class ForceWatcher:
         f_med = np.median(self.median_buf)
 
         prev_med = self.prev_med
-
-        # Get peak always
-        # self.peak = max(self.peak, f_med)
-        # self.debug_msg(f"New Peak!: {self.peak:.3f} N", 0.05)
 
         # ------------ 1) BASELINE / SEARCHING STATE ------------
         if self.STATE == "BASELINE":
@@ -110,9 +108,10 @@ class ForceWatcher:
             else:
                 df = f_med - prev_med # current (smoothed) minus previous
             
-            cond1 = (f_med-self.noise_floor) > self.contact_delta
+            cond1 = f_med > (self.noise_floor + self.contact_delta)
+            # self.debug_msg(f"f_med is: {f_med:.3f}")
             # cond2 = True # TEMP DISABLING     df > self.contact_slope:
-            cond2 = f_med > self.min_force_close_zero # TEMP testing to avoid tiny forces (robot jerk) detecting as contact
+            cond2 = True #f_med > (self.noise_floor + self.min_force_close_zero) # TEMP testing to avoid tiny forces (robot jerk) detecting as contact
             if cond1 and cond2:
                 self.contact_count += 1
                 self.debug_msg(f"""Contact magnitude met: f_med={f_med:.3f} N, (contact_delta={self.contact_delta:.3f})""") if cond1 else None
@@ -122,7 +121,8 @@ class ForceWatcher:
                     self.debug_msg(f"{self.contact_count} CONTACTS DETECTED!", 0)
             else:
                 self.contact_count = 0
-                self.debug_msg(f"""Contact magnitude NOT met: \nf_med={f_med:.3f} <= noise floor+delta={self.noise_floor+self.contact_delta:.3f} N \nContact count reset.""", 0.1)
+                if self.debug:
+                    self.debug_msg(f"""Contact magnitude NOT met: \nf_med={f_med:.3f} <= noise floor+delta={self.noise_floor+self.contact_delta:.3f} N \nContact count reset.""", 0.1)
 
         # ------------ 3) PEAK TRACKING ------------
         if self.STATE == "PEAK":
@@ -162,7 +162,7 @@ class ForceWatcher:
                         self.pub_trigger.publish(1)
                         self.trigger = True
                         self.debug_msg(f"Stop triggered(peak: {self.peak:.3f} N, threshold: {thresh:.3f} N, current: {f_med:.3f} N).")
-                        self.sub_ft.unregister()
+                        # self.sub_ft.unregister()
                 else:
                     self.below_count = 0
         

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import rospy
-from com_3d.vel_controller import VelocityController
+from com_3d.vel_controller import VelocityController, arm_logs, disarm_logs
+from com_3d.force_watcher import ForceWatcher
 import numpy as np
 
 # RETRIEVED BY JOGGING ROBOT TO *EXACTLY* ALL ZERO JOINTS
@@ -11,6 +12,7 @@ HOME_QUAT = [0.000000, 0.7071000, 0.000000, 0.7071000]
 # RETRIEVED FROM ONSHAPE AND REAL MEASUREMENTS
 Z_OFFSET_MOUNT = 0.035 # Z readings are 35mm higher than expected because of mounting bar
 X_OFFSET_FINGER = 0.08225+ 0.11 # X readings are ~192.25 mm 'less' than expected due to FT and finger length
+
 
 # ******** For DIRECT JOINT CONTROL, since sim robot is +35mm from table, joint q is already 'correct' in table frame... *********
 
@@ -37,11 +39,11 @@ OBJECT_MOTIONS = {
         "prep_q": [0, 1.091, 0.506, 0, -1.597, 0] # manual prep joint config
     },
 
-    # "monitor": {
-    #     "prep": [0.440, 0.000, 0.50],  # z=0.5 in z IN WORLD
-    #     "push": [0.600, 0.000, 0.50],  # move forward along x by ~15 cm
-    #     # "prep_q": [-0.004, 1.154, 0.437, -0.008, -1.566, 0.001] # manual prep joint config
-    # },
+    "monitor": {
+        "prep": [0.440, 0.000, 0.50],  # z=0.5 in z IN WORLD
+        "push": [0.600, 0.000, 0.50],  # move forward along x by ~15 cm
+        "prep_q": [0, 0.054, 0.552, 0.006, -0.608, 0]
+    },
 
     "flashlight": {
         "prep": [HOME_XYZ[0], HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT],  # z=0.25 in z IN WORLD
@@ -50,69 +52,78 @@ OBJECT_MOTIONS = {
     }
 }
 
-# def get_object_name():
-#     """
-#     Get the object name from ROS parameter server or use default.
-#     """
-#     return rospy.get_param("~object", None)
-
-
 def main():
     rospy.init_node("go_forward")
+
+    DURATION    = 8.0 # seconds
+    PUSH_SPEED  = 0.01 # m/s
+    K_SAFE      = 0.5  # (1= topple, 0= None)
 
     # object_name = get_object_name()
     object_name = rospy.get_param("~object", None)
     if object_name is None or object_name not in OBJECT_MOTIONS:
         rospy.logerr(f"[go_forward] Object '{object_name}' not recognized. Set _object:= to one of: {list(OBJECT_MOTIONS.keys())}")
         return
-    
-    # Publish object name globally for logging
-    rospy.set_param("/com_3d/object_name", object_name)
+    else:
+        # Publish object name globally for logging
+        rospy.set_param("/com_3d/object_name", object_name)
+        joint_pos = OBJECT_MOTIONS[object_name]["prep_q"]
+        rospy.loginfo(f"[go_forward] Preparing to push object '{object_name}'.")
 
+
+    # Velocity controller
     ctrl = VelocityController(max_joint_vel=1.0)
-
-    # prep_xyz = OBJECT_MOTIONS[object_name]["prep"]
-    # push_xyz = OBJECT_MOTIONS[object_name]["push"]
-    # orientation = OBJECT_MOTIONS[object_name]["quat"]
-    joint_pos = OBJECT_MOTIONS[object_name]["prep_q"]
-
-    rospy.loginfo(f"[go_forward] Preparing to push object '{object_name}'.")
-
-    
-    # 1) Move to pre-push pose
-    success_prep = ctrl.move_to_joint_positions(
-        joint_pos, timeout=5.0, tol=8e-3
+    # Force watcher
+    fw = ForceWatcher(
+        ft_topic="/netft_data_transformed",
+        k_safe=K_SAFE,
+        debug=False,
+        initial_state="BASELINE", # THIS WAS NONE BEFORE, and we set Baseline INSIDE the motion loop
     )
+    rospy.sleep(0.25) # Let things settle for baseline collection
+
+    ## ========= BEGIN MOTION SEQUENCE ========= 
+    # 1) Move to pre-push pose
+    success_prep = ctrl.move_to_joint_positions(joint_pos, timeout=5.0, tol=8e-3)
     if not success_prep:
         rospy.logerr("[go_forward] Pre-push motion failed!")
         return
     else:
         rospy.loginfo("[go_forward] Pre-push pose reached.\n")
-
-    # NICE LONG SLEEP TO LET MOTIONS FINISH AND STABILIZE
-    rospy.sleep(2.0)
+    rospy.sleep(2.0) # NICE LONG SLEEP TO LET MOTIONS FINISH AND STABILIZE
     
-    # 2) Execute push motion
-    success_push = ctrl.cartesian_velocity(
-        v=[0.01, 0, 0], # XYZ
-        w=[0, 0, 0],   # RPY
-        duration=16.0, # 8
-        k_safe=0.5, # (1= topple, 0= None)
-        arm_logs=True,
-    )
 
+    # 2) Execute push motion
+    arm_logs()  # Start logging for push motion
+    success_push = ctrl.cartesian_velocity(
+        v=[PUSH_SPEED, 0, 0], # XYZ
+        w=[0, 0, 0],   # RPY
+        duration=DURATION, # 8
+        force_watcher=fw,
+        lock_orient=True,
+    )
     if not success_push:
         rospy.logerr("[go_forward] Push motion failed!")
+        disarm_logs()  # Stop logging for push motion
         return
     else:
         rospy.loginfo("[go_forward] succeeded.\n")
 
 
     # 3) Return to pre-push pose
-    success_return = ctrl.move_to_joint_positions(
-        joint_pos, timeout=5.0, tol=8e-3
+    ## FIRST PHASE: First retract along same linear path
+    success_retract = ctrl.cartesian_velocity(
+        v=[-PUSH_SPEED, 0, 0], # XYZ
+        w=[0, 0, 0],   # RPY
+        duration=ctrl.last_cartesian_duration, # NOW THIS USES THE ACTUAL LAST DURATION (return same distance)
     )
+    disarm_logs()  # Stop logging for push motion
+    if not success_retract:
+        rospy.logerr("[go_forward] Retraction motion failed!")
+        return
 
+    # SECOND PHASE: Go back to exact joint pose
+    success_return = ctrl.move_to_joint_positions(joint_pos, timeout=5.0, tol=8e-3)
     if not success_return:
         rospy.logerr("[go_forward] Return motion failed!")
     else:
