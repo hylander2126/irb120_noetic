@@ -3,7 +3,8 @@ import os, csv, cv2, rospy, rospkg
 from threading import Lock
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import WrenchStamped, TransformStamped
+from geometry_msgs.msg import WrenchStamped, PoseStamped
+from collections import deque
 from apriltag_ros.msg import AprilTagDetectionArray
 from std_msgs.msg import Empty, Bool
 from datetime import datetime
@@ -14,7 +15,6 @@ from sensor_msgs.msg import JointState
 from urdf_parser_py.urdf import URDF
 from kdl_parser_py.urdf import treeFromUrdfModel
 import PyKDL as kdl
-
 
 WARMUP_FRAMES_DEFAULT = 10
 FPS_HINT_DEFAULT = 30
@@ -41,6 +41,10 @@ class FTClockLogger:
         self.fps_hint       = float(rospy.get_param('~fps_hint', FPS_HINT_DEFAULT))
         # self.warmup_frames  = int(rospy.get_param('~warmup_frames', WARMUP_FRAMES_DEFAULT))
         self.last_flush     = rospy.Time.now().to_sec()
+        # --- params for EE pose ---
+        self.tip_pose_max_age = float(rospy.get_param('~tip_pose_max_age', 0.02)) # 20ms default
+        self.tip_pose_buf_len = int(rospy.get_param('~tip_pose_buf_len', 400)) # ~4s at 100Hz
+        self._tip_buf       = deque(maxlen=self.tip_pose_buf_len)  # (t, [x,y,z,qx,qy,qz,qw])
 
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -49,7 +53,7 @@ class FTClockLogger:
         self.traj_idx = 0
         self.recording = False
         self.csv_f = self.csv_w = None
-        self.lock = Lock()
+        self.csv_lock = Lock()
         self.last_flush = rospy.Time.now().to_sec()
 
         # --- video state ---
@@ -63,32 +67,10 @@ class FTClockLogger:
         self.ft_trigger_flag = 0
 
         # latest tag (sample-and-hold; no interp)
-        self.tag_latest = None #{'t': None, 'id': None,
-                               #'rpy': (None, None, None),
-                               #'txyz': (None, None, None)}
+        self.tag_latest = None
 
-        # --- KDL FK for EE pose (base_link -> finger_tip) ---
-        robot = URDF.from_parameter_server('robot_description')
-        ok, tree = treeFromUrdfModel(robot)
-        if not ok:
-            rospy.logerr("[ft_clock_logger] Failed to build KDL tree from URDF.")
-            raise RuntimeError("KDL tree error")
-
-        self.chain = tree.getChain(self.base_frame, self.ee_frame)
-        self.fk_solver = kdl.ChainFkSolverPos_recursive(self.chain)
-        self.nj = self.chain.getNrOfJoints()
-
-        # Joint names in KDL order (only movable joints)
-        self.kdl_joint_names = []
-        for i in range(self.chain.getNrOfSegments()):
-            seg = self.chain.getSegment(i)
-            jnt = seg.getJoint()
-            # In PyKDL Python, easiest check:
-            if jnt.getTypeName() != "None":
-                self.kdl_joint_names.append(jnt.getName())
-
-        self._q_lock = Lock()
-        self._q = None  # latest joint positions in KDL order
+        # EE pose from FK node (uses KDL accessed by controller, too)
+        self._EE_lock = Lock()
         self.ee_last = [0.0] * 7  # fallback EE pose
         
 
@@ -100,11 +82,13 @@ class FTClockLogger:
         rospy.Subscriber('/com_3d/fw_trigger_status', Bool, self._on_fw_trigger)
         # --- image subscriber (buffered) ---
         rospy.Subscriber(self.image_topic, Image, self._on_image, queue_size=10, buff_size=2**24)
-        rospy.Subscriber("/egm/joint_states", JointState, self._on_joint_state, queue_size=100)
+        # rospy.Subscriber("/egm/joint_states", JointState, self._on_joint_state, queue_size=100)
+        # --- tip pose subscriber (buffered) ---
+        rospy.Subscriber("/com_3d/tip_pose_fk", PoseStamped, self._on_tip_pose, queue_size=200)
         
 
     def _start(self, _):
-        with self.lock:
+        with self.csv_lock:
             if self.recording: return
             self.traj_idx += 1
             # Build a base name from datetime + object name
@@ -137,7 +121,7 @@ class FTClockLogger:
         rospy.loginfo("[ft_clock_logger] START -> %s", path)
 
     def _stop(self, _):
-        with self.lock:
+        with self.csv_lock:
             if not self.recording: return
             self.recording = False
             # stop video first
@@ -158,15 +142,22 @@ class FTClockLogger:
         rospy.loginfo("[ft_clock_logger] STOP")
 
     def _on_tag(self, msg: AprilTagDetectionArray):
-        if not msg.detections: return
+        # if not msg.detections: return
 
         # timestamp of this detection
         t = msg.header.stamp.to_sec() if msg.header.stamp else rospy.Time.now().to_sec()
 
-        # single tag: take first detection
-        if len(msg.detections) < 1:
+        # If no detections explicitly clear latest so logging shows NaNs instead of stale data
+        if not msg.detections: 
+            with self.csv_lock:
+                self.tag_latest = None
+            return
+        # Additional catch if somehow no detections but non-empty array
+        elif len(msg.detections) < 1:
             self.tag_latest = None
             return
+        
+        # single tag: take first detection
         det = msg.detections[0]
         p = det.pose.pose.pose
         q = [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w]
@@ -175,14 +166,14 @@ class FTClockLogger:
         tag_id = det.id[0] if det.id else -1
 
         # store latest (optional, not used for row-writing in tag-clock)
-        with self.lock:
+        with self.csv_lock:
             self.tag_latest = {'t': t, 'id': int(tag_id),
                                'rpy': (roll, pitch, yaw),
                                'txyz': (tx, ty, tz)}
 
     def _on_image(self, msg: Image):
         # Write overlay frames to MP4 after a short warmup
-        with self.lock:
+        with self.csv_lock:
             if not self.recording: return
             # Convert
             try:
@@ -201,7 +192,6 @@ class FTClockLogger:
                     return
 
             # self.frames_seen += 1
-            # if self.frames_seen > self.warmup_frames and self.writer is not None:
             if self.writer is not None:
                 try:
                     self.writer.write(frame)
@@ -221,40 +211,37 @@ class FTClockLogger:
         # FT at tag time: sample-and-hold (use the most recent FT sample seen)
         if ft is None:
             return  # no FT seen yet; skip this row until first FT arrives
-        
 
-        ## Retrieve the latest tag info
-        with self.lock:
+        ## Retrieve the latest tag and EE info
+        with self.csv_lock:
             tag = self.tag_latest
-
-        # only write when armed
-        with self.lock:
-            if not self.recording or self.csv_w is None:
-                return
-
-        ee = self._get_latest_ee()
-
+        if tag is not None and abs(tag['t'] - t) > self.tag_max_age:
+            tag = None  # too old
+        
+        ee  = self._get_tip_pose_at(t)
 
         # Write row (tag_visible=1 because we write only when a tag exists)
-        with self.lock:
+        with self.csv_lock:
             if not self.recording or self.csv_w is None:
                 return
             
             if tag is not None:
                 trpy = tag['rpy']
                 txyz = tag['txyz']
-                tag_row = 1, tag['id'], 
-                f"{trpy[0]:.5f}", f"{trpy[1]:.5f}", f"{trpy[2]:.5f}", 
-                f"{txyz[0]:.5f}", f"{txyz[1]:.5f}", f"{txyz[2]:.5f}"
+                tag_row = (
+                    1, tag['id'], 
+                    f"{trpy[0]:.5f}", f"{trpy[1]:.5f}", f"{trpy[2]:.5f}", 
+                    f"{txyz[0]:.5f}", f"{txyz[1]:.5f}", f"{txyz[2]:.5f}"
+                )
             else:
-                tag_row = 0, "nan", "nan", "nan", "nan", "nan", "nan", "nan"
+                tag_row = (0, -1, "OLD", "OLD", "OLD", "OLD", "OLD", "OLD")
                 
             self.csv_w.writerow([
                 f"{t:.6f}",
                 f"{ft[0]:.5f}",  f"{ft[1]:.5f}",  f"{ft[2]:.5f}",
                 f"{ft[3]:.5f}",  f"{ft[4]:.5f}",  f"{ft[5]:.5f}",
-                f"{ee[0]:.5f}", f"{ee[1]:.5f}", f"{ee[2]:.5f}",
-                f"{ee[3]:.5f}", f"{ee[4]:.5f}", f"{ee[5]:.5f}", f"{ee[6]:.5f}",
+                f"{ee[0]:.5f}",  f"{ee[1]:.5f}",  f"{ee[2]:.5f}",
+                f"{ee[3]:.5f}",  f"{ee[4]:.5f}",  f"{ee[5]:.5f}", f"{ee[6]:.5f}",
                 *tag_row,
                 self.ft_contact_flag, self.ft_trigger_flag
             ])
@@ -264,59 +251,41 @@ class FTClockLogger:
 
     
     def _on_fw_contact(self, msg: Bool):
-        with self.lock:
+        with self.csv_lock:
             if msg.data:
                 self.ft_contact_flag = 1
 
     def _on_fw_trigger(self, msg: Bool):
-        with self.lock:
+        with self.csv_lock:
             if msg.data:
                 self.ft_trigger_flag = 1
 
-    def _on_joint_state(self, msg: JointState):
-        """Maintain latest joint vector in KDL joint order."""
-        name_to_pos = {n: p for n, p in zip(msg.name, msg.position)}
+    def _on_tip_pose(self, msg: PoseStamped):
+        t = msg.header.stamp.to_sec() if msg.header.stamp else rospy.Time.now().to_sec()
+        p = msg.pose.position
+        q = msg.pose.orientation
+        ee = [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
+        with self._EE_lock:
+            self._tip_buf.append((t, ee))
 
-        q = []
-        for jn in self.kdl_joint_names:
-            if jn not in name_to_pos:
-                # Incomplete; skip this message
-                return
-            q.append(name_to_pos[jn])
+    def _get_tip_pose_at(self, t_query: float):
+        """
+        Return tip pose sample closest to t_query, or last known pose if none fresh enough.
+        """
+        with self._EE_lock:
+            buf = list(self._tip_buf)
 
-        with self._q_lock:
-            self._q = q
+        if not buf:
+            return self.ee_last[:]  # fallback
 
-    def _get_latest_ee(self):
-        """EE pose via KDL FK using latest joint state"""
-        with self._q_lock:
-            q_curr = None if self._q is None else list(self._q)
+        # nearest neighbor in time
+        t_best, ee_best = min(buf, key=lambda x: abs(x[0] - t_query))
+        if abs(t_best - t_query) > self.tip_pose_max_age:
+            # too stale: use last known pose (or still use ee_best if you prefer)
+            return self.ee_last[:]
 
-        if q_curr is not None and len(q_curr) == self.nj:
-            try:
-                q_kdl = kdl.JntArray(self.nj)
-                for i, v in enumerate(q_curr):
-                    q_kdl[i] = v
-
-                F = kdl.Frame()
-                self.fk_solver.JntToCart(q_kdl, F)
-
-                p = F.p
-                qx, qy, qz, qw = F.M.GetQuaternion()
-
-                ee = [p[0], p[1], p[2], qx, qy, qz, qw]
-                self.ee_last = ee[:]
-            except Exception as e:
-                rospy.logwarn_throttle(
-                    1.0,
-                    f"[ft_clock_logger] FK failed, using last EE pose: {e}"
-                )
-                ee = self.ee_last[:]
-        else:
-            # No valid joint state yet; use last known EE pose
-            ee = self.ee_last[:]
-
-        return ee
+        self.ee_last = ee_best[:]  # update fallback
+        return ee_best
 
         
 

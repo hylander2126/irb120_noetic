@@ -92,4 +92,7 @@
     <!-- <param name="warmup_frames" value="10"/> --> <!-- TESTING WITHOUT WARMUP FRAMES SINCE WE OPEN LIVESTREAM IMMMEDIATELY, I DONT' THINK WE NEED THIS-->
   </node>
 
+  <!-- Run the FK tip pose publisher -->
+  <node pkg="com_3d" type="fk_tip_publisher.py" name="fk_tip_publisher" output="screen"/>
+  
 </launch>

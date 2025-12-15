@@ -4,25 +4,25 @@ import numpy as np
 
 import rospy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
-from std_msgs.msg import Empty
+from std_msgs.msg import Float64MultiArray, Empty
+from geometry_msgs.msg import PoseStamped
 
 from threading import Lock
 from abb_robot_msgs.srv import TriggerWithResultCode
 from abb_egm_msgs.msg import EGMState, EGMChannelState
 
-
 from urdf_parser_py.urdf import URDF
 from kdl_parser_py.urdf import treeFromUrdfModel
 import PyKDL as kdl
 
-from .force_watcher import ForceWatcher
+# from .force_watcher import ForceWatcher
 
 
 # Global EGM/Logging wrappers
 EGM_START_SRV    = "/rws/sm_addin/start_egm_joint"
 EGM_STOP_SRV     = "/rws/sm_addin/stop_egm"
 EGM_STATES_TOPIC = "/egm/egm_states"
+
 def _start_egm_wait_till_active(timeout=5.0):
     """
     Blocks until the EGM controller reports "active: True" for at least one channel.
@@ -133,7 +133,14 @@ class VelocityController:
         self.max_joint_vel       = float(max_joint_vel)
         self.joint_safety_margin = float(joint_safety_margin)
         self.floor_z_margin      = float(floor_z_margin)
-        # ^^ Make wrist joint 5 more responsive so we don't have the issues with lagging
+
+        # External FK tip pose (pub'd by FK node)
+        self._EE_lock               = Lock()
+        self._EE_pose               = None # np.array([x,y,z, qx,qy,qz,qw])
+        self._EE_stamp              = None # float seconds
+        self.ee_max_age             = 0.01 # 10 ms
+        self.ee_warn_throttle_sec   = 1.0
+
         self.last_cartesian_stop_reason = None
         self.last_cartesian_duration    = None
 
@@ -225,6 +232,9 @@ class VelocityController:
         )
         self.vel_pub = rospy.Publisher(
             vel_cmd_topic, Float64MultiArray, queue_size=1
+        )
+        self.EE_sub = rospy.Subscriber(
+            "/com_3d/tip_pose_fk", PoseStamped, self._EE_pose_cb, queue_size=100
         )
 
         self.rate = rospy.Rate(self.rate_hz)
@@ -356,7 +366,7 @@ class VelocityController:
         _stop_egm_wait_till_active()
         return True if stop_reason == "success" else False
 
-    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True):
+    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True, lock_z=True):
         """
         Apply a constant Cartesian twist for 'duration' seconds.
 
@@ -365,11 +375,11 @@ class VelocityController:
         duration: seconds
         """
 
-        twist_np = np.asarray(list(v) + list(w), dtype=float)
-        if twist_np.shape != (6,):
+        twist_des = np.asarray(list(v) + list(w), dtype=float)
+        if twist_des.shape != (6,):
             raise ValueError("[VC] v and w must each be length 3")
         
-        if list(w) != [0,0,0]:
+        if not np.allclose(w, 0.0, atol=1e-6):
             lock_orient = False
             rospy.logwarn("[VC] Non-zero angular velocity requested; disabling orientation lock.")
 
@@ -378,18 +388,28 @@ class VelocityController:
         _start_egm_wait_till_active()
 
         # Desired orientation for lock_orient servo
-        if lock_orient:
-            with self._state_lock:
-                q_curr = None if self._q is None else self._q.copy()
-            if q_curr is None:
-                raise RuntimeError("[VC] No joint state available for orientation lock.")
-            _, M_des = self._tip_pose(q_curr)
-            kp_orient = 1.0  # [rad/s per rad error]
+        if lock_orient or lock_z:
+            # with self._state_lock:
+            #     q_curr = None if self._q is None else self._q.copy()
+            # if q_curr is None:
+            #     raise RuntimeError("[VC] No joint state available for orientation or z-lock.")
+            # Regardless, get initial pose
+            # xyz_init, M_des = self._tip_pose(q_curr)
+            xyz_init, M_init, age = self._get_EE_xyz_M()
+            if xyz_init is None or M_init is None:
+                raise RuntimeError("[VC] No fresh EE FK pose available for lock_orient/lock_z. "
+                                   "Is /com_3d/tip_pose_fk being published?")
+            if lock_orient:
+                M_des = M_init
+                KP_ORIENT = 1.0  # [rad/s per rad error]
+                rospy.loginfo(f"[VC] Orientation lock enabled (pose at motion start).")
+            if lock_z:
+                z_des = xyz_init[2]
+                KZ_P = 1.0 # [m/s per m error]
+                rospy.loginfo(f"[VC] Z-lock enabled at z={z_des:.4f} m (height at motion start).")            
 
-        # rospy.sleep(0.5)
 
         start_time = rospy.Time.now()
-
         early_stop_reason = None # For logging
 
         ## ============================ CARTESIAN MOTION LOOP ============================
@@ -404,45 +424,60 @@ class VelocityController:
                 self.rate.sleep()
                 continue
 
-            # Check force watcher
+            # ----------- Check force watcher -----------
             if force_watcher is not None:
                 if elapsed < 0.5: # Allow initial settling time
                     force_watcher.STATE = "MONITOR" # FORCE the watcher back to monitoring state
                     force_watcher.trigger = False
                     force_watcher.contact_count = 0
                     force_watcher.below_count = 0
-                # if force_watcher.STATE is None:
-                #     force_watcher.STATE = "BASELINE"  # start baseline if not already started
+
                 if force_watcher.trigger:
                     early_stop_reason = "force < f_safe."
                     break
+            # -------------------------------------------
 
-            # LOCK_ORIENT IS ONLY ENABLED UNDER LINEAR MOTION REQUESTS (no w desired)
-            if lock_orient:
+            # ----------- FK for pose (for orient and z-lock) -----------
+            xyz_curr = None
+            M_curr = None
+            if lock_orient or lock_z:
+                # xyz_curr, M_curr = self._tip_pose(q_curr)
+                xyz_curr, M_curr, age = self._get_EE_xyz_M()
+                if xyz_curr is None or M_curr is None:
+                    early_stop_reason = "EE FK Pose stale/missing."
+                    break
+
+            # FIRST build the linear component of the twist command (with z lock if enabled)
+            v_cmd = np.array(v, dtype=float)
+            
+            if lock_z:
+                z_curr = xyz_curr[2]
+                e_z = z_des - z_curr
+                vz_corr = KZ_P * e_z # simple P control on Z
+                # Clamp vertical correction
+                vz_corr = np.clip(vz_corr, -0.05, 0.05)
+                # rospy.loginfo(f"[VC] vz_corr={vz_corr:.4f} for z_err={e_z:.4f}")
+                v_cmd[2] = v_cmd[2] + vz_corr
+
+            # SECOND determine angular component (w_cmd)
+            w_cmd = np.array(w, dtype=float) # Default to requested w
+
+
+            if lock_orient: # ONLY runs if w_des was zero
                 # Get current Rot matrix
-                _, M_curr = self._tip_pose(q_curr)
-                # Simple orientation error (small- angle approx)
-                # # Wrap into [-pi, pi] to avoid large jumps
                 err_R = M_curr.Inverse() * M_des
-
-                # Axis-angle representation
-                rot_vec = err_R.GetRot()
-
+                rx, ry, rz = err_R.GetRot() # Axis-angle representation
                 # Angular error vector e = theta * u
-                # err_ori = (ori_err + np.pi) % (2 * np.pi) - np.pi # Original with rpy
-                err_ori = np.array([rot_vec[0], rot_vec[1], rot_vec[2]])
-                
+                err_ori = np.array([rx, ry, rz], dtype=float)
                 # Angluar velocity command to correct orientation error
-                w_cmd = kp_orient * err_ori # [wx, wy, wz]
-
-                rospy.loginfo(f"[VC] ori_err={err_ori}, w_cmd={w_cmd}")
-                twist_cmd = np.concatenate([v, w_cmd])
-            else:
-                twist_cmd = twist_np.copy()
-
-
+                w_cmd = KP_ORIENT * err_ori # [wx, wy, wz]
+                # rospy.loginfo(f"[VC] ori_err={err_ori}, w_cmd={w_cmd}")
+            
+            # Combine into twist command
+            twist_cmd = np.concatenate([v_cmd, w_cmd])
             # Compute joint velocities via KDL velocity IK
             q_dot_cmd = self._ik_velocity(q_curr, twist_cmd)
+
             # -------------- SAFETY: Joint-limit avoidance ----------
             q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
 
@@ -535,6 +570,21 @@ class VelocityController:
         with self._state_lock:
             self._q = q
 
+    def _EE_pose_cb(self, msg: PoseStamped):
+        t = msg.header.stamp.to_sec() if msg.header.stamp else rospy.Time.now().to_sec()
+        p = msg.pose.position
+        q = msg.pose.orientation
+        pose = np.array([p.x, p.y, p.z, q.x, q.y, q.z, q.w], dtype=float)
+        with self._EE_lock:
+            self._EE_pose = pose
+            self._EE_stamp = t
+
+    def _get_EE_pose(self):
+        with self._EE_lock:
+            if self._EE_pose is None:
+                return None, None
+            return self._EE_pose.copy(), float(self._EE_stamp)
+
     def _wait_for_joint_state(self, timeout=5.0):
         t0 = rospy.Time.now()
         while not rospy.is_shutdown():
@@ -597,11 +647,11 @@ class VelocityController:
                 rospy.logwarn_throttle(
                     1.0, f"[VC] Joint {self.joint_names[i]} near UPPER limit; zeroing vel."
                 )
-
         return q_dot_cmd
 
 
     def _publish_velocity(self, q_dot_cmd):
+        """ Publish joint velocity command to the robot."""
         msg = Float64MultiArray()
         msg.data = q_dot_cmd.tolist()
         self.vel_pub.publish(msg)
@@ -616,7 +666,6 @@ class VelocityController:
         """
         x, y, z = xyz
         rr, rp, ry = rpy
-
         R = kdl.Rotation.RPY(rr, rp, ry)
         p = kdl.Vector(x, y, z)
         return kdl.Frame(R, p)
@@ -666,12 +715,6 @@ class VelocityController:
         self.fk_solver.JntToCart(q_kdl, FK)
         return FK
     
-    # def _tip_position(self, q_np):
-    #     """Get the current fingertip position in BASE frame as np.array [x,y,z]."""
-    #     F_tip = self._fk_position(q_np)
-    #     p = F_tip.p
-    #     return np.array([p[0], p[1], p[2]])
-    
     def _tip_pose(self, q_np):
         """
         Get the current fingertip pose (xyz, M) in BASE frame.
@@ -688,3 +731,26 @@ class VelocityController:
         """
         pos, _ = self._tip_pose(q_np)
         return pos[2] >= self.floor_z_margin
+    
+
+    def _get_EE_xyz_M(self):
+        """
+        Return (xyz_np, M_kdl, age_sec) from subscribed FK pose.
+        If missing or stale, return (None, None, None).
+        """
+        pose, t = self._get_EE_pose()
+        if pose is None:
+            return None, None, None
+
+        age = rospy.Time.now().to_sec() - t
+        if age > self.ee_max_age:
+            rospy.logwarn_throttle(
+                self.ee_warn_throttle_sec,
+                f"[VC] EE FK pose too old (age={age*1000:.2f} ms > {self.ee_max_age*1000:.2f} ms)."
+            )
+            return None, None, age
+
+        xyz = pose[0:3].copy()
+        qx, qy, qz, qw = pose[3:7]
+        M = kdl.Rotation.Quaternion(float(qx), float(qy), float(qz), float(qw))
+        return xyz, M, age

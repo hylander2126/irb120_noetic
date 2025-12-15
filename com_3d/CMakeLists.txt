@@ -166,6 +166,7 @@ catkin_install_python(PROGRAMS
   scripts/transform_netft.py  
   scripts/vel_go_home.py
   scripts/vel_move.py
+  scripts/fk_tip_publisher.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
