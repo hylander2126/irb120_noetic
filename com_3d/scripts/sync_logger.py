@@ -36,7 +36,7 @@ class FTClockLogger:
         self.tag_topic          = rospy.get_param('~dets_topic_name', '/tag_detections')
         self.image_topic        = rospy.get_param('~image_topic', '/tag_detections_image')  # overlay from apriltag_ros
         # --- params for tag detections + video ---
-        self.tag_max_age    = float(rospy.get_param('~tag_max_age', 0.10))
+        # self.tag_max_age    = float(rospy.get_param('~tag_max_age', 0.10))
         self.flush_period   = float(rospy.get_param('~flush_period', 0.25))
         self.fps_hint       = float(rospy.get_param('~fps_hint', FPS_HINT_DEFAULT))
         # self.warmup_frames  = int(rospy.get_param('~warmup_frames', WARMUP_FRAMES_DEFAULT))
@@ -68,6 +68,7 @@ class FTClockLogger:
 
         # latest tag (sample-and-hold; no interp)
         self.tag_latest = None
+        self.tag_last_rpy = None
 
         # EE pose from FK node (uses KDL accessed by controller, too)
         self._EE_lock = Lock()
@@ -107,8 +108,8 @@ class FTClockLogger:
                 'fx','fy','fz','mx','my','mz',
                 'ee_x','ee_y','ee_z','ee_qx','ee_qy','ee_qz','ee_qw',
                 'tag_visible','tag_id',
-                'tag_roll(rad)','tag_pitch(rad)','tag_yaw(rad)',
-                'tag_tx(m)','tag_ty(m)','tag_tz(m)',
+                'tag_qx','tag_qy','tag_qz','tag_qw',
+                'tag_x','tag_y','tag_z',
                 'fw_contact','ft_trigger'
             ])
             self.recording = True
@@ -160,15 +161,16 @@ class FTClockLogger:
         # single tag: take first detection
         det = msg.detections[0]
         p = det.pose.pose.pose
-        q = [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w]
-        roll, pitch, yaw = euler_from_quaternion(q, axes='sxyz')
+        q = p.orientation
+        qx, qy, qz, qw = q.x, q.y, q.z, q.w
+        # roll, pitch, yaw = euler_from_quaternion(q, axes='sxyz')
         tx, ty, tz = p.position.x, p.position.y, p.position.z
         tag_id = det.id[0] if det.id else -1
 
         # store latest (optional, not used for row-writing in tag-clock)
         with self.csv_lock:
             self.tag_latest = {'t': t, 'id': int(tag_id),
-                               'rpy': (roll, pitch, yaw),
+                               'tq': (qx, qy, qz, qw),
                                'txyz': (tx, ty, tz)}
 
     def _on_image(self, msg: Image):
@@ -215,8 +217,9 @@ class FTClockLogger:
         ## Retrieve the latest tag and EE info
         with self.csv_lock:
             tag = self.tag_latest
-        if tag is not None and abs(tag['t'] - t) > self.tag_max_age:
-            tag = None  # too old
+        # if tag is not None and abs(tag['t'] - t) > self.tag_max_age:
+        #     tag = None  # too old
+        # TEMP HACK: DISABLING TAG AGE CHECKING
         
         ee  = self._get_tip_pose_at(t)
 
@@ -226,15 +229,15 @@ class FTClockLogger:
                 return
             
             if tag is not None:
-                trpy = tag['rpy']
+                tq = tag['tq']
                 txyz = tag['txyz']
                 tag_row = (
                     1, tag['id'], 
-                    f"{trpy[0]:.5f}", f"{trpy[1]:.5f}", f"{trpy[2]:.5f}", 
+                    f"{tq[0]:.5f}", f"{tq[1]:.5f}", f"{tq[2]:.5f}", f"{tq[3]:.5f}",
                     f"{txyz[0]:.5f}", f"{txyz[1]:.5f}", f"{txyz[2]:.5f}"
                 )
             else:
-                tag_row = (0, -1, "OLD", "OLD", "OLD", "OLD", "OLD", "OLD")
+                tag_row = (0, -1, "nan", "nan", "nan", "nan", "nan", "nan", "nan")
                 
             self.csv_w.writerow([
                 f"{t:.6f}",

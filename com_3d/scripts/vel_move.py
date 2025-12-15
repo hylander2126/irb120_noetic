@@ -22,33 +22,39 @@ X_OFFSET_FINGER = 0.08225+ 0.11 # X readings are ~192.25 mm 'less' than expected
 
 OBJECT_MOTIONS = {
     "box": {
-        "prep": [HOME_XYZ[0]-0.05, HOME_XYZ[1], 0.25-Z_OFFSET_MOUNT], # Z=0.25 in TABLE FRAME
-        "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.25-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
+        # "prep": [HOME_XYZ[0]-0.05, HOME_XYZ[1], 0.25-Z_OFFSET_MOUNT], # Z=0.25 in TABLE FRAME
+        # "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.25-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
         "prep_q": [0, 0.615, 0.867, 0, -1.482, 0] # manual prep joint config ( Yields Z=225mmm..?)
     },
     
     "heart":{
-        "prep": [HOME_XYZ[0]-0.05, HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT], # Z=0.175 in TABLE FRAME
-        "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
+        # "prep": [HOME_XYZ[0]-0.05, HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT], # Z=0.175 in TABLE FRAME
+        # "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
         "prep_q": [0, 0.941, 0.748, 0, -1.689, 0] # manual prep joint config
     },
 
     "lshape": {
-        "prep": [HOME_XYZ[0], HOME_XYZ[1], 0.145-Z_OFFSET_MOUNT],  # Z=0.145 in TABLE FRAME
-        "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.145-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
+        # "prep": [HOME_XYZ[0], HOME_XYZ[1], 0.145-Z_OFFSET_MOUNT],  # Z=0.145 in TABLE FRAME
+        # "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.145-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
         "prep_q": [0, 1.091, 0.506, 0, -1.597, 0] # manual prep joint config
     },
 
     "monitor": {
-        "prep": [0.440, 0.000, 0.50],  # z=0.5 in z IN WORLD
-        "push": [0.600, 0.000, 0.50],  # move forward along x by ~15 cm
+        # "prep": [0.440, 0.000, 0.50],  # z=0.5 in z IN WORLD
+        # "push": [0.600, 0.000, 0.50],  # move forward along x by ~15 cm
         "prep_q": [0, 0.054, 0.552, 0.006, -0.608, 0]
     },
 
     "flashlight": {
-        "prep": [HOME_XYZ[0], HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT],  # z=0.25 in z IN WORLD
-        "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
+        # "prep": [HOME_XYZ[0], HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT],  # z=0.25 in z IN WORLD
+        # "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
         "prep_q": [0, 0.978, 0.566, 0, -1.544, 0] # manual prep joint config
+    },
+
+    "soda": {
+        # "prep": [HOME_XYZ[0], HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT],  # z=0.25 in z IN WORLD
+        # "push": [HOME_XYZ[0]-0.05+0.2, HOME_XYZ[1], 0.175-Z_OFFSET_MOUNT], # Forward along x by 20cm (note how this is )
+        "prep_q": [0, 0.803, 0.640, 0, -1.445, 0] # manual prep joint config
     }
 }
 
@@ -116,7 +122,7 @@ def main():
         v=[-PUSH_SPEED, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
         duration=ctrl.last_cartesian_duration, # NOW THIS USES THE ACTUAL LAST DURATION (return same distance)
-        lock_orient=False,
+        lock_orient=True,
     )
     disarm_logs()  # Stop logging for push motion
     if not success_retract:

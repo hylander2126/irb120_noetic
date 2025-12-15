@@ -24,7 +24,7 @@ class FKTipPublisher:
     """
 
     def __init__(self):
-        self.base_link = rospy.get_param("~base_link", "base_link")
+        self.base_link = rospy.get_param("~base_link", "table")
         self.tip_link  = rospy.get_param("~tip_link",  "finger_tip")
         self.urdf_param = rospy.get_param("~urdf_param", "robot_description")
 

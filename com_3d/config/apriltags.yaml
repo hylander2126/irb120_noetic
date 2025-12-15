@@ -26,6 +26,7 @@ standalone_tags:
     {id: 2, size: 0.04}, #, name: 'monitor'},
     {id: 3, size: 0.04}, #, name: 'box'},
     {id: 4, size: 0.04}, #, name: 'flashlight'},
+    {id: 5, size: 0.04}, #, name: 'soda'},
   ]
 # ## Tag bundle definitions
 # ### Remarks

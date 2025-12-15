@@ -138,7 +138,7 @@ class VelocityController:
         self._EE_lock               = Lock()
         self._EE_pose               = None # np.array([x,y,z, qx,qy,qz,qw])
         self._EE_stamp              = None # float seconds
-        self.ee_max_age             = 0.01 # 10 ms
+        self.ee_max_age             = 0.02 # 20 ms
         self.ee_warn_throttle_sec   = 1.0
 
         self.last_cartesian_stop_reason = None
@@ -441,7 +441,6 @@ class VelocityController:
             xyz_curr = None
             M_curr = None
             if lock_orient or lock_z:
-                # xyz_curr, M_curr = self._tip_pose(q_curr)
                 xyz_curr, M_curr, age = self._get_EE_xyz_M()
                 if xyz_curr is None or M_curr is None:
                     early_stop_reason = "EE FK Pose stale/missing."
@@ -512,7 +511,7 @@ class VelocityController:
             rospy.loginfo(f"[VC] Stopped due to: {early_stop_reason}")
             return True
 
-        rospy.logwarn(f"[VC] Shouldn't reach this point. Stopped due to: {early_stop_reason}")
+        rospy.logwarn(f"[VC] Stopped due to: {early_stop_reason}")
         return True
     
 

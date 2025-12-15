@@ -15,6 +15,9 @@
   <xacro:property name="finger_length" value="0.110"/>   <!-- finger length (from onshape)-->
   <!-- Total offset from link_6 to finger tip will be ft_length + finger_length -->
 
+  <!-- Calibrated so that when finger_tip touches the table, FK reports z=-0.01199 in base_link -->
+  <xacro:property name="table_to_base_z" value="0.01199"/>  <!-- meters -->
+
   <!-- ====== FT sensor link mounted to link_6 ====== -->
   <link name="ft_link">
     <inertial>
@@ -96,6 +99,15 @@
     <parent link="finger_link"/>
     <origin xyz="0 0 ${finger_length}" rpy="0 0 0"/>
     <child link="finger_tip"/>
+  </joint>
+
+  <link name='table'/>
+
+  <!-- Table is the parent (world-ish), base_link is lifted above it by table_to_base_z -->
+  <joint name="table_to_base_link" type="fixed">
+    <parent link="table"/>
+    <origin xyz="0 0 ${table_to_base_z}" rpy="0 0 0"/>
+    <child link="base_link"/>
   </joint>
 
 </robot>
