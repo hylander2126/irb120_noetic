@@ -181,3 +181,19 @@ class ForceWatcher:
                 rospy.loginfo_once(f"[ForceWatcher] {msg}")
             else:
                 rospy.loginfo_throttle(throttle, f"[ForceWatcher] {msg}")
+
+
+    def reset(self, force_state="BASELINE"):
+        """Full reset of all state variables and publishers."""
+        self.STATE = force_state # Or MONITOR if you prefer
+        self.trigger = False
+        self.contact_count = 0
+        self.below_count = 0
+        self.peak = 0.0
+        self.baseline_ready = False
+        self.baseline_buf = [0.0] * len(self.baseline_buf)
+        
+        # Publish the cleared state immediately to update latched topics
+        self.pub_contact.publish(False)
+        self.pub_trigger.publish(False)
+        rospy.loginfo("[ForceWatcher] State reset for new run.")

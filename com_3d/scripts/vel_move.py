@@ -100,6 +100,7 @@ def main():
     
 
     # 2) Execute push motion
+    fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
     arm_logs()  # Start logging for push motion
     success_push = ctrl.cartesian_velocity(
         v=[PUSH_SPEED, 0, 0], # XYZ

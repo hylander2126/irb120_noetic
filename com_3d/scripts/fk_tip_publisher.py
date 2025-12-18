@@ -29,7 +29,7 @@ class FKTipPublisher:
         self.urdf_param = rospy.get_param("~urdf_param", "robot_description")
 
         self.joint_state_topic = rospy.get_param("~joint_state_topic", "/egm/joint_states")
-        self.out_topic         = rospy.get_param("~out_topic", "/com_3d/tip_pose_fk")
+        self.out_topic         = rospy.get_param("~out_topic", "/com_3d/tip_pose_global")
 
         # Optional: warn if FK fails too often
         self.warn_throttle_sec = float(rospy.get_param("~warn_throttle_sec", 1.0))

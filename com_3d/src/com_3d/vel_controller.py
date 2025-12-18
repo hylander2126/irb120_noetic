@@ -9,94 +9,111 @@ from geometry_msgs.msg import PoseStamped
 
 from threading import Lock
 from abb_robot_msgs.srv import TriggerWithResultCode
-from abb_egm_msgs.msg import EGMState, EGMChannelState
+from abb_egm_msgs.msg import EGMState
 
 from urdf_parser_py.urdf import URDF
 from kdl_parser_py.urdf import treeFromUrdfModel
 import PyKDL as kdl
 
-# from .force_watcher import ForceWatcher
+# def _start_egm_wait_till_active(timeout=5.0):
+#     """
+#     Blocks until the EGM controller reports "active: True" for at least one channel.
+#     """
+#     # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
+#     t_start = rospy.Time.now()
 
+#     while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
+#         try:
+#             # Wait for a single message with a short timeout to prevent blocking
+#             msg = rospy.wait_for_message("/egm/egm_states", EGMState, timeout=0.1)
+#         except rospy.ROSException:
+#             continue # Timeout or shutdown occurred while waiting for the message
+#         if not msg.egm_channels:
+#             continue # The message is empty, which shouldn't happen but skip if it does
 
-# Global EGM/Logging wrappers
-EGM_START_SRV    = "/rws/sm_addin/start_egm_joint"
-EGM_STOP_SRV     = "/rws/sm_addin/stop_egm"
-EGM_STATES_TOPIC = "/egm/egm_states"
+#         # Now try to start the EGM
+#         _start_egm()
 
-def _start_egm_wait_till_active(timeout=5.0):
-    """
-    Blocks until the EGM controller reports "active: True" for at least one channel.
-    """
-    # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
+#         # Check if OUR channel reports active: True
+#         our_channel = msg.egm_channels[0]
+#         if our_channel.active:
+#             # rospy.loginfo("[EGM Wait] Status 'active: True' detected.")
+#             return True
+#     raise RuntimeError("EGM did not become active within timeout.")
+
+# def _stop_egm_wait_till_active(timeout=5.0):
+#     """
+#     Blocks until the EGM controller reports "active: False" for at least one channel.
+#     """
+#     # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
+#     t_start = rospy.Time.now()
+
+#     while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
+#         try:
+#             # Wait for a single message with a short timeout to prevent blocking
+#             msg = rospy.wait_for_message("/egm/egm_states", EGMState, timeout=0.1)
+#         except rospy.ROSException:
+#             continue # Timeout or shutdown occurred while waiting for the message
+#         if not msg.egm_channels:
+#             continue # The message is empty, which shouldn't happen but skip if it does
+
+#         # Now try to start the EGM
+#         _stop_egm()
+
+#         # Check if OUR channel reports active: False
+#         our_channel = msg.egm_channels[0]
+#         if not our_channel.active:
+#             # rospy.loginfo("[EGM Wait] Status 'active: False' detected.")
+#             return True
+#     raise RuntimeError("EGM did not become active within timeout.")
+
+EGM_START_SRV = "/rws/sm_addin/start_egm_joint"
+EGM_STOP_SRV  = "/rws/sm_addin/stop_egm"
+
+def _wait_for_egm_active(target_active=True, timeout=5.0):
+    """Blocks until EGM state matches target_active."""
     t_start = rospy.Time.now()
-
     while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
         try:
-            # Wait for a single message with a short timeout to prevent blocking
-            msg = rospy.wait_for_message(EGM_STATES_TOPIC, EGMState, timeout=0.1)
+            msg = rospy.wait_for_message("/egm/egm_states", EGMState, timeout=0.1)
+            if msg.egm_channels: # If the message isn't empty
+                # Issue command if state doesn't match
+                if msg.egm_channels[0].active != target_active:
+                    _call_egm_service(EGM_START_SRV if target_active else EGM_STOP_SRV)
+                else:
+                    return True # Desired state reached (or was already correct)
         except rospy.ROSException:
             continue # Timeout or shutdown occurred while waiting for the message
-        if not msg.egm_channels:
-            continue # The message is empty, which shouldn't happen but skip if it does
-
-        # Now try to start the EGM
-        _start_egm()
-
-        # Check if OUR channel reports active: True
-        our_channel = msg.egm_channels[0]
-        if our_channel.active:
-            # rospy.loginfo("[EGM Wait] Status 'active: True' detected.")
-            return True
-    raise RuntimeError("EGM did not become active within timeout.")
-
-def _stop_egm_wait_till_active(timeout=5.0):
-    """
-    Blocks until the EGM controller reports "active: False" for at least one channel.
-    """
-    # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
-    t_start = rospy.Time.now()
-
-    while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
-        try:
-            # Wait for a single message with a short timeout to prevent blocking
-            msg = rospy.wait_for_message(EGM_STATES_TOPIC, EGMState, timeout=0.1)
-        except rospy.ROSException:
-            continue # Timeout or shutdown occurred while waiting for the message
-        if not msg.egm_channels:
-            continue # The message is empty, which shouldn't happen but skip if it does
-
-        # Now try to start the EGM
-        _stop_egm()
-
-        # Check if OUR channel reports active: False
-        our_channel = msg.egm_channels[0]
-        if not our_channel.active:
-            # rospy.loginfo("[EGM Wait] Status 'active: False' detected.")
-            return True
-    raise RuntimeError("EGM did not become active within timeout.")
+    raise RuntimeError(f"EGM did not reach active={target_active} within timeout.")
 
 
-def _start_egm():
-    rospy.wait_for_service(EGM_START_SRV)
+# def _start_egm():
+#     rospy.wait_for_service("/rws/sm_addin/start_egm_joint")
+#     try:
+#         rospy.ServiceProxy("/rws/sm_addin/start_egm_joint", TriggerWithResultCode)(TriggerWithResultCode._request_class())
+#     except Exception as e:
+#         rospy.logwarn(f"start_egm call failed: {e}")
+
+# def _stop_egm():
+#     rospy.wait_for_service("/rws/sm_addin/stop_egm")
+#     try:
+#         rospy.ServiceProxy("/rws/sm_addin/stop_egm", TriggerWithResultCode)(TriggerWithResultCode._request_class())
+#     except Exception as e:
+#         rospy.logwarn(f"stop_egm call failed: {e}")
+
+def _call_egm_service(service_name):
+    """Generic safe service caller for EGM commands."""
     try:
-        rospy.ServiceProxy(EGM_START_SRV, TriggerWithResultCode)(TriggerWithResultCode._request_class())
-    except Exception as e:
-        rospy.logwarn(f"start_egm call failed: {e}")
-
-def _stop_egm():
-    rospy.wait_for_service(EGM_STOP_SRV)
-    try:
-        rospy.ServiceProxy(EGM_STOP_SRV, TriggerWithResultCode)(TriggerWithResultCode._request_class())
-    except Exception as e:
-        rospy.logwarn(f"stop_egm call failed: {e}")
+        rospy.wait_for_service(service_name, timeout=2.0)
+        rospy.ServiceProxy(service_name, TriggerWithResultCode)(TriggerWithResultCode._request_class()) # second parentheses calls the service
+    except (rospy.ServiceException, rospy.ROSInterruptException, rospy.ROSException) as e:
+        rospy.logwarn(f"[VC] EGM Service call failed ({service_name}): {e}")
 
 def arm_logs():
     rospy.Publisher('/com_3d/log_start', Empty, queue_size=1, latch=True).publish(Empty())
-    rospy.loginfo(f"LOGS ARMED AT ROS TIME:{rospy.Time.now().to_sec():.3f}")
 
 def disarm_logs():
     rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
-    rospy.loginfo(f"LOGS DISARMED AT ROS TIME:{rospy.Time.now().to_sec():.3f}")
 
 
 class VelocityController:
@@ -116,15 +133,15 @@ class VelocityController:
 
     def __init__(
         self,
-        base_link           ="base_link",
-        tip_link            ="finger_tip", # tool0",
-        urdf_param          ="robot_description",
-        joint_state_topic   ="/egm/joint_states",
-        vel_cmd_topic       ="/egm/joint_group_velocity_controller/command",
-        rate_hz             =100.0,
-        max_joint_vel       =2.0,          # rad/s safety clamp
-        joint_safety_margin =0.05,   # rad away from hard limits
-        floor_z_margin      =0.06,       # Lowest the fingertip should be allowed to go
+        base_link           = "table",
+        tip_link            = "finger_tip",
+        urdf_param          = "robot_description",
+        joint_state_topic   = "/egm/joint_states",
+        vel_cmd_topic       = "/egm/joint_group_velocity_controller/command",
+        rate_hz             = 100.0,
+        max_joint_vel       = 1.57,   # 0.5*pi rad/s safety clamp
+        joint_safety_margin = 0.05,   # rad away from hard limits
+        floor_z_margin      = 0.06,   # Lowest the fingertip should be allowed to go
     ):
         self.base_link           = base_link
         self.tip_link            = tip_link
@@ -134,472 +151,140 @@ class VelocityController:
         self.joint_safety_margin = float(joint_safety_margin)
         self.floor_z_margin      = float(floor_z_margin)
 
-        # External FK tip pose (pub'd by FK node)
-        self._EE_lock               = Lock()
-        self._EE_pose               = None # np.array([x,y,z, qx,qy,qz,qw])
-        self._EE_stamp              = None # float seconds
-        self.ee_max_age             = 0.02 # 20 ms
-        self.ee_warn_throttle_sec   = 1.0
-
-        self.last_cartesian_stop_reason = None
+        # FK state tracking
+        self.ee_max_age                 = 0.02 # 20 ms
         self.last_cartesian_duration    = None
 
-        # ---------------------------------------------------------------------
+        # Joint goal gains
+        self.kp_joints = 4.0  # [rad/s per rad error]
+        self.ki_joints = 0.4  # [rad/s^2 per rad error]
+        self.kd_joints = 0.01 # [rad/s per rad error rate]
+        self.err_prev = np.zeros(6, dtype=float)
+        self.err_I    = np.zeros(6, dtype=float)
+        self.I_max    = np.full(6, 0.5, dtype=float)  # rad*sec
+
+        # Cartesian gains
+        self.kp_orient = 1.0  # [rad/s per rad error]
+        self.kp_zlock  = 1.0  # [m/s per m error]
+
+
         # 1) Parse URDF and build KDL chain
         # ---------------------------------------------------------------------
         rospy.loginfo(f"[VC] Loading URDF from '{urdf_param}'...")
+        
         robot = URDF.from_parameter_server(key=urdf_param)
-
         ok, tree = treeFromUrdfModel(robot)
         if not ok:
             raise RuntimeError("[VC] Failed to parse URDF into KDL tree")
 
         self.chain = tree.getChain(self.base_link, self.tip_link)
         self.nj = self.chain.getNrOfJoints()
-
-        # Extract joint order from the chain
-        self.joint_names = []
-        for i in range(self.chain.getNrOfSegments()):
-            seg = self.chain.getSegment(i)
-            jnt = seg.getJoint()
-            # "None" joints are fixed; skip those
-            jtype_name = jnt.getTypeName()
-            # if (jnt.getType() != kdl.Joint.Fixed):
-            if jtype_name != "None":
-                self.joint_names.append(jnt.getName())
-
-        # rospy.loginfo(f"[VC] KDL chain {self.base_link} -> {self.tip_link} "
-        #               f"with joints: {self.joint_names}")
+        self.joint_names = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6'] # FORCE SETTING JOINT NAMES FOR IRB120
 
         # Joint limits from URDF (aligned with self.joint_names)
         lower, upper = [], []
         for name in self.joint_names:
             j = robot.joint_map[name]
-            if j.limit is None:
-                lower.append(-math.inf)
-                upper.append(+math.inf)
-            else:
-                lower.append(j.limit.lower)
-                upper.append(j.limit.upper)
+            lower.append(j.limit.lower)
+            upper.append(j.limit.upper)
         self.joint_lower = np.array(lower)
         self.joint_upper = np.array(upper)
 
-        # ---------------------------------------------------------------------
         # 2) KDL solvers
         # ---------------------------------------------------------------------
         self.fk_solver = kdl.ChainFkSolverPos_recursive(self.chain)
         self.jac_solver = kdl.ChainJntToJacSolver(self.chain)
 
         # Damped (weighted) velocity IK if available, else pseudoinverse
-        try:
-            self.ik_solver_vel = kdl.ChainIkSolverVel_wdls(self.chain)
-            self.ik_solver_vel.setLambda(1e-2)  # damping factor
-            rospy.loginfo("[VC] Using ChainIkSolverVel_wdls (damped IK).")
-        except AttributeError:
-            self.ik_solver_vel = kdl.ChainIkSolverVel_pinv(self.chain)
-            rospy.logwarn("[VC] ChainIkSolverVel_wdls not available; using "
-                          "ChainIkSolverVel_pinv (less robust near singularities).")
+        self.ik_solver_vel = kdl.ChainIkSolverVel_wdls(self.chain)
+        self.ik_solver_vel.setLambda(1e-2)  # damping factor
+        rospy.loginfo("[VC] Using ChainIkSolverVel_wdls (damped IK).")
             
         # ---- NEW: joint-limited position IK (NR_JL) ----
         q_min = kdl.JntArray(self.nj)
         q_max = kdl.JntArray(self.nj)
         for i in range(self.nj):
-            # fall back to huge limits if URDF has +/-inf (shouldn't, but just in case)
-            lo = self.joint_lower[i]
-            hi = self.joint_upper[i]
-            q_min[i] = lo if np.isfinite(lo) else -1e9
-            q_max[i] = hi if np.isfinite(hi) else  1e9
+            q_min[i] = self.joint_lower[i]
+            q_max[i] = self.joint_upper[i]
 
         self.ik_solver_pos = kdl.ChainIkSolverPos_NR_JL(
-            self.chain,
-            q_min,
-            q_max,
-            self.fk_solver,
-            self.ik_solver_vel,
-            100,        # max iterations
-            1e-4        # eps
+            self.chain, q_min, q_max, self.fk_solver, self.ik_solver_vel, 100, 1e-4
         )
         rospy.loginfo("[VC] Using ChainIkSolverPos_NR_JL for position IK with joint limits.")
 
-        # ---------------------------------------------------------------------
+
         # 3) ROS I/O
         # ---------------------------------------------------------------------
         self._state_lock = Lock()
-        self._q = None  # np.array, aligned with self.joint_names
+        self._q          = None  # np.array, aligned with self.joint_names
+        self._last_pose  = None  # PoseStamped
 
-        self.joint_sub = rospy.Subscriber(
-            joint_state_topic, JointState, self._joint_state_cb, queue_size=1
-        )
-        self.vel_pub = rospy.Publisher(
-            vel_cmd_topic, Float64MultiArray, queue_size=1
-        )
-        self.EE_sub = rospy.Subscriber(
-            "/com_3d/tip_pose_fk", PoseStamped, self._EE_pose_cb, queue_size=100
-        )
+        self.joint_sub = rospy.Subscriber(joint_state_topic, JointState, self._joint_state_cb, queue_size=1)
+        self.vel_pub   = rospy.Publisher(vel_cmd_topic, Float64MultiArray, queue_size=1)
+        # Unified FK output for logger and other nodes
+        self.fk_pub = rospy.Publisher("/com_3d/tip_pose_fk", PoseStamped, queue_size=200)
 
         self.rate = rospy.Rate(self.rate_hz)
 
-        rospy.loginfo("[VC] Waiting for first joint state...")
-        self._wait_for_joint_state()
+        # Wait for first joint state before returning
+        rospy.loginfo("[VC] Waiting for JointState...")
+        while not rospy.is_shutdown():
+            with self._state_lock:
+                if self._q is not None: break
+            self.rate.sleep()
         rospy.loginfo("[VC] Joint State Found! Ready.")
-
-
-    # =====================================================================
-    #   PUBLIC API
-    # =====================================================================
-
-    def move_to_joint_positions(self, q_target, timeout=5.0, tol=1e-3, bypass_floor=False):
-        """
-        Drive joints to q_target using a simple velocity P-controller.
-
-        q_target: list/np.array of target joint angles (rad),
-                  same order as self.joint_names.
-        timeout:  seconds before giving up.
-        kp:       proportional gain [rad/s per rad error].
-        tol:      norm of joint error to consider 'done'.
-        bypass_floor: if True, bypass the floor_z safety check.
-        """
-        q_target = np.asarray(q_target, dtype=float)
-        if q_target.shape != (self.nj,):
-            raise ValueError(
-                f"q_target must be length {self.nj} (got {q_target.shape})\n"
-                f"Joint order is: {self.joint_names}"
-            )
-        # ---------- SAFETY: check floor_z constraint ----------
-        if not self._floor_constraint_isok(q_target):
-            raise RuntimeError(
-                f"[VC] Refusing move_to_joint_positions to target {q_target}"
-                f" because fingertip Z would be below floor limit "
-            )
-        # ------------------------------------------------------
-
-        kp_joints = np.array([4.0, 4.0, 4.0, 4.0, 6.0, 4.0], dtype=float)
-        ki_joints = np.array([0.4, 0.4, 0.4, 0.4, 0.6, 0.4], dtype=float)
-        kd_joints = np.array([0.01, 0.01, 0.01, 0.01, 0.02, 0.01], dtype=float)
-
-        # kp_joints = np.array([2.0, 2.0, 2.0, 2.0, 6.0, 2.0], dtype=float)
-        # ki_joints = np.array([0.2, 0.2, 0.2, 0.2, 0.6, 0.2], dtype=float)
-        # kd_joints = np.array([0.01, 0.01, 0.01, 0.01, 0.02, 0.01], dtype=float)
-
-        # PID State
-        err_prev = np.zeros(self.nj, dtype=float)
-        err_I = np.zeros(self.nj, dtype=float)
-
-        # Integral anti-windup limits
-        I_MAX = np.full(self.nj, 0.5, dtype=float)  # rad*sec
-
-        _start_egm_wait_till_active()
-        rospy.sleep(0.5)
-
-        start_time = rospy.Time.now()
-        rospy.loginfo(f"[VC] move_to_joint_positions:\n{q_target}")
-
-        stop_reason = None
-
-        ## =========================== MOTION LOOP ============================
-        while not rospy.is_shutdown():
-            now = rospy.Time.now()
-            elapsed = (now - start_time).to_sec()
-
-            if elapsed > timeout:
-                rospy.logwarn(f"[VC] move_to_joint_positions timed out. Joint errors:\n"
-                              f"{q_target - q_curr}, norm={np.linalg.norm(q_target - q_curr)}")
-                break
-
-            with self._state_lock:
-                q_curr = None if self._q is None else self._q.copy()
-            if q_curr is None:
-                self.rate.sleep()
-                continue
-
-            # Compute error
-            err = q_target - q_curr
-            err_norm = float(np.linalg.norm(err))
-
-            # Check for convergence
-            if err_norm < tol:
-                rospy.loginfo("[VC] Joint target reached. Joint errors:\n"
-                              f"{q_target - q_curr}, norm={err_norm}")
-                stop_reason = "success"
-                break
-
-            # ----- PID control -----
-            # Integral and anti-windup
-            err_I += err * self.dt
-            err_I = np.clip(err_I, -I_MAX, I_MAX)
-            # Derivative
-            err_D = (err - err_prev) / self.dt
-
-            vel_raw = kp_joints * err + ki_joints * err_I + kd_joints * err_D
-
-            err_prev = err.copy()
-
-            # Enforce max joint velocity scaling
-            max_abs = float(np.max(np.abs(vel_raw)))
-            if max_abs > self.max_joint_vel:
-                scale = self.max_joint_vel / max_abs
-                vel_raw *= scale
-
-            q_dot_cmd = vel_raw
-
-            # Joint-limit avoidance (very simple clamp near limits)
-            q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
-
-            # -------------- SAFETY: check floor_z constraint ----------
-            if not bypass_floor and not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt): # q_next
-                rospy.logwarn_throttle(1.0, f"[VC] Next joint q violates floor constraint: {self.floor_z_margin}. Zeroing velocities.")
-                stop_reason = "floor_z constraint violated."
-                break
-            # ---------------------------------------------------------
-
-            # Saturate joint velocities
-            q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
-
-            self._publish_velocity(q_dot_cmd)
-            self.rate.sleep()
-
-        ## =========================== END MOTION LOOP ============================
-
-        # Stop motion
-        self._publish_velocity(np.zeros(self.nj))
-        rospy.sleep(0.5)
-        _stop_egm_wait_till_active()
-        return True if stop_reason == "success" else False
-
-    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True, lock_z=True):
-        """
-        Apply a constant Cartesian twist for 'duration' seconds.
-
-        v: [vx, vy, vz] in BASE frame (m/s)
-        w: [wx, wy, wz] in BASE frame (rad/s)
-        duration: seconds
-        """
-
-        twist_des = np.asarray(list(v) + list(w), dtype=float)
-        if twist_des.shape != (6,):
-            raise ValueError("[VC] v and w must each be length 3")
-        
-        if not np.allclose(w, 0.0, atol=1e-6):
-            lock_orient = False
-            rospy.logwarn("[VC] Non-zero angular velocity requested; disabling orientation lock.")
-
-        rospy.loginfo(f"[VC] cartesian_velocity v={v}, w={w}, duration={duration}")
-
-        _start_egm_wait_till_active()
-
-        # Desired orientation for lock_orient servo
-        if lock_orient or lock_z:
-            # with self._state_lock:
-            #     q_curr = None if self._q is None else self._q.copy()
-            # if q_curr is None:
-            #     raise RuntimeError("[VC] No joint state available for orientation or z-lock.")
-            # Regardless, get initial pose
-            # xyz_init, M_des = self._tip_pose(q_curr)
-            xyz_init, M_init, age = self._get_EE_xyz_M()
-            if xyz_init is None or M_init is None:
-                raise RuntimeError("[VC] No fresh EE FK pose available for lock_orient/lock_z. "
-                                   "Is /com_3d/tip_pose_fk being published?")
-            if lock_orient:
-                M_des = M_init
-                KP_ORIENT = 1.0  # [rad/s per rad error]
-                rospy.loginfo(f"[VC] Orientation lock enabled (pose at motion start).")
-            if lock_z:
-                z_des = xyz_init[2]
-                KZ_P = 1.0 # [m/s per m error]
-                rospy.loginfo(f"[VC] Z-lock enabled at z={z_des:.4f} m (height at motion start).")            
-
-
-        start_time = rospy.Time.now()
-        early_stop_reason = None # For logging
-
-        ## ============================ CARTESIAN MOTION LOOP ============================
-        while not rospy.is_shutdown():
-            elapsed = (rospy.Time.now() - start_time).to_sec()
-            if elapsed > duration:
-                break
-
-            with self._state_lock:
-                q_curr = None if self._q is None else self._q.copy()
-            if q_curr is None:
-                self.rate.sleep()
-                continue
-
-            # ----------- Check force watcher -----------
-            if force_watcher is not None:
-                if elapsed < 0.5: # Allow initial settling time
-                    force_watcher.STATE = "MONITOR" # FORCE the watcher back to monitoring state
-                    force_watcher.trigger = False
-                    force_watcher.contact_count = 0
-                    force_watcher.below_count = 0
-
-                if force_watcher.trigger:
-                    early_stop_reason = "force < f_safe."
-                    break
-            # -------------------------------------------
-
-            # ----------- FK for pose (for orient and z-lock) -----------
-            xyz_curr = None
-            M_curr = None
-            if lock_orient or lock_z:
-                xyz_curr, M_curr, age = self._get_EE_xyz_M()
-                if xyz_curr is None or M_curr is None:
-                    early_stop_reason = "EE FK Pose stale/missing."
-                    break
-
-            # FIRST build the linear component of the twist command (with z lock if enabled)
-            v_cmd = np.array(v, dtype=float)
-            
-            if lock_z:
-                z_curr = xyz_curr[2]
-                e_z = z_des - z_curr
-                vz_corr = KZ_P * e_z # simple P control on Z
-                # Clamp vertical correction
-                vz_corr = np.clip(vz_corr, -0.05, 0.05)
-                # rospy.loginfo(f"[VC] vz_corr={vz_corr:.4f} for z_err={e_z:.4f}")
-                v_cmd[2] = v_cmd[2] + vz_corr
-
-            # SECOND determine angular component (w_cmd)
-            w_cmd = np.array(w, dtype=float) # Default to requested w
-
-
-            if lock_orient: # ONLY runs if w_des was zero
-                # Get current Rot matrix
-                err_R = M_curr.Inverse() * M_des
-                rx, ry, rz = err_R.GetRot() # Axis-angle representation
-                # Angular error vector e = theta * u
-                err_ori = np.array([rx, ry, rz], dtype=float)
-                # Angluar velocity command to correct orientation error
-                w_cmd = KP_ORIENT * err_ori # [wx, wy, wz]
-                # rospy.loginfo(f"[VC] ori_err={err_ori}, w_cmd={w_cmd}")
-            
-            # Combine into twist command
-            twist_cmd = np.concatenate([v_cmd, w_cmd])
-            # Compute joint velocities via KDL velocity IK
-            q_dot_cmd = self._ik_velocity(q_curr, twist_cmd)
-
-            # -------------- SAFETY: Joint-limit avoidance ----------
-            q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
-
-            # -------------- SAFETY: check floor_z constraint ----------
-            if not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt):
-                rospy.logwarn_throttle(1.0, f"[VC] Next joint q violates floor constraint: {self.floor_z_margin}. Zeroing velocities.")
-                early_stop_reason = "floor_z constraint violated."
-                break
-
-            # Clamp velocities
-            q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
-
-            self._publish_velocity(q_dot_cmd)
-            self.rate.sleep()
-        ## ============================ END CARTESIAN MOTION LOOP ============================
-
-        # Stop after duration
-        self._publish_velocity(np.zeros(self.nj))
-
-        self.last_cartesian_stop_reason = early_stop_reason
-        self.last_cartesian_duration    = (rospy.Time.now() - start_time).to_sec()
-
-        # rospy.sleep(0.1) # Sleep to ensure stop command is sent
-        _stop_egm_wait_till_active()
-        
-        if early_stop_reason is None:
-            return True
-        elif early_stop_reason=="floor_z constraint violated.":
-            rospy.logerr(f"[VC] cartesian_velocity stopped early due to: {early_stop_reason}")
-            return False
-        elif early_stop_reason=="force < f_safe.":
-            rospy.loginfo(f"[VC] Stopped due to: {early_stop_reason}")
-            return True
-
-        rospy.logwarn(f"[VC] Stopped due to: {early_stop_reason}")
-        return True
-    
-
-    def compute_ik(self, xyz, rpy, q_seed=None):
-        """
-        Public wrapper to get joint angles for a desired pose (xyz, rpy).
-
-        xyz: [x, y, z] in BASE frame (meters)
-        rpy: [roll, pitch, yaw] in BASE frame (rad)
-        q_seed: optional initial guess array.
-
-        Returns: np.array length nj (joint angles).
-        """
-        xyz = np.asarray(xyz, dtype=float)
-        rpy = np.asarray(rpy, dtype=float)
-        if xyz.shape != (3,) or rpy.shape != (3,):
-            raise ValueError("xyz and rpy must each be length 3")
-
-        q_sol = self._ik_position(xyz, rpy, q_seed=q_seed)
-        rospy.loginfo(f"[VC] compute_ik -> {q_sol}")
-        return q_sol
-
-
-    def move_to_pose(self, xyz, rpy, timeout=5.0, kp=2.0, tol=1e-3, q_seed=None):
-        """
-        Solve IK for (xyz, rpy) and then move there using move_to_joint_positions.
-
-        xyz, rpy: pose in BASE frame.
-
-        **************************************** UNTESTED UNTESTED UNTESTED *********************************************
-        """
-        q_target = self.compute_ik(xyz, rpy, q_seed=q_seed)
-        return self.move_to_joint_positions(
-            q_target=q_target,
-            timeout=timeout,
-            kp=kp,
-            tol=tol,
-        )
 
 
     # =====================================================================
     #   INTERNAL HELPERS
     # =====================================================================
-
-    def _joint_state_cb(self, msg):
+    def _to_kdl_jnt_array(self, q_np):
+        qa = kdl.JntArray(self.nj)
+        for i in range(self.nj): qa[i] = float(q_np[i])
+        return qa
+    
+    def _joint_state_cb(self, msg: JointState):
+        """ Get joint states, calculate FK, and publish PoseStamped."""
         # Build q aligned with self.joint_names
         name_to_idx = {n: i for i, n in enumerate(msg.name)}
         q = np.zeros(self.nj)
-        for i, jname in enumerate(self.joint_names):
-            if jname not in name_to_idx:
-                # If a joint is missing, leave it as previous or zero.
-                continue
-            q[i] = msg.position[name_to_idx[jname]]
+        for i, jn in enumerate(self.joint_names):
+            if jn in name_to_idx: q[i] = msg.position[name_to_idx[jn]]
+
+        # Compute local FK
+        q_kdl = self._to_kdl_jnt_array(q) # convert to KDL
+        F = kdl.Frame()
+        self.fk_solver.JntToCart(q_kdl, F)
+
+        ps = PoseStamped()
+        ps.header.stamp = msg.header.stamp if msg.header.stamp.to_sec() > 0 else rospy.Time.now()
+        ps.header.frame_id = self.base_link
+        ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = F.p
+        ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = F.M.GetQuaternion()
 
         with self._state_lock:
             self._q = q
+            self._last_pose = ps
+        self.fk_pub.publish(ps)
 
-    def _EE_pose_cb(self, msg: PoseStamped):
-        t = msg.header.stamp.to_sec() if msg.header.stamp else rospy.Time.now().to_sec()
-        p = msg.pose.position
-        q = msg.pose.orientation
-        pose = np.array([p.x, p.y, p.z, q.x, q.y, q.z, q.w], dtype=float)
-        with self._EE_lock:
-            self._EE_pose = pose
-            self._EE_stamp = t
+    def _get_tip_pose(self):
+        """Return (xyz_np, quat_kdl, age_sec) from last calculated FK pose."""
+        with self._state_lock:
+            if self._last_pose is None: return None, None, None
+            
+            ps = self._last_pose
+            age = (rospy.Time.now() - ps.header.stamp).to_sec()
+            if age > self.ee_max_age:
+                rospy.logwarn_throttle(1.0, f"[VC] FK Pose stale: {age*1000:.2f}ms.")
+                return None, None, age
 
-    def _get_EE_pose(self):
-        with self._EE_lock:
-            if self._EE_pose is None:
-                return None, None
-            return self._EE_pose.copy(), float(self._EE_stamp)
+            xyz = np.array([ps.pose.position.x, ps.pose.position.y, ps.pose.position.z])
+            o = ps.pose.orientation
+            return xyz, kdl.Rotation.Quaternion(o.x, o.y, o.z, o.w), age
 
-    def _wait_for_joint_state(self, timeout=5.0):
-        t0 = rospy.Time.now()
-        while not rospy.is_shutdown():
-            with self._state_lock:
-                if self._q is not None:
-                    return
-            if (rospy.Time.now() - t0).to_sec() > timeout:
-                rospy.logwarn("[VC] No joint state received yet (still waiting).")
-                t0 = rospy.Time.now()
-            self.rate.sleep()
-
-    def _to_kdl_jnt_array(self, q_np):
-        qa = kdl.JntArray(self.nj)
-        for i in range(self.nj):
-            qa[i] = float(q_np[i])
-        return qa
+    def _publish_velocity(self, q_dot_cmd):
+        """ Publish joint velocity command to the robot."""
+        self.vel_pub.publish(Float64MultiArray(data=q_dot_cmd.tolist()))
 
     def _ik_velocity(self, q_np, twist_np):
         """Use KDL's velocity IK solver to map twist -> q_dot."""
@@ -608,13 +293,10 @@ class VelocityController:
         v = kdl.Vector(twist_np[0], twist_np[1], twist_np[2])
         w = kdl.Vector(twist_np[3], twist_np[4], twist_np[5])
         twist_kdl = kdl.Twist(v, w)
-
         dq_kdl = kdl.JntArray(self.nj)
         ret = self.ik_solver_vel.CartToJnt(q_kdl, twist_kdl, dq_kdl)
         if ret < 0:
-            rospy.logwarn_throttle(
-                1.0, f"[VC] IK velocity solver failed with code={ret}; sending zero vel"
-            )
+            rospy.logwarn_throttle(1.0, f"[VC] IK vel solver failed: {ret}; zeroing vel")
             return np.zeros(self.nj)
 
         dq = np.zeros(self.nj)
@@ -630,47 +312,240 @@ class VelocityController:
         """
         q_next = q_curr + q_dot_cmd * self.dt
 
-        lower_safe = self.joint_lower + self.joint_safety_margin
-        upper_safe = self.joint_upper - self.joint_safety_margin
+        lo_safe = self.joint_lower + self.joint_safety_margin
+        hi_safe = self.joint_upper - self.joint_safety_margin
 
         for i in range(self.nj):
-            # Lower side
-            if np.isfinite(lower_safe[i]) and q_next[i] < lower_safe[i] and q_dot_cmd[i] < 0.0:
+            if q_next[i] < lo_safe[i] and q_dot_cmd[i] < 0.0:
                 q_dot_cmd[i] = 0.0
-                rospy.logwarn_throttle(
-                    1.0, f"[VC] Joint {self.joint_names[i]} near LOWER limit; zeroing vel."
-                )
-            # Upper side
-            if np.isfinite(upper_safe[i]) and q_next[i] > upper_safe[i] and q_dot_cmd[i] > 0.0:
+                rospy.logwarn_throttle(1.0, f"[VC] {self.joint_names[i]} LOWER limit; zeroing vel.")
+            if q_next[i] > hi_safe[i] and q_dot_cmd[i] > 0.0:
                 q_dot_cmd[i] = 0.0
-                rospy.logwarn_throttle(
-                    1.0, f"[VC] Joint {self.joint_names[i]} near UPPER limit; zeroing vel."
-                )
+                rospy.logwarn_throttle(1.0, f"[VC] {self.joint_names[i]} UPPER limit; zeroing vel.")
         return q_dot_cmd
 
+    def _floor_constraint_isok(self, q_np):
+        """Return True if fingertip Z is above floor_z_margin. q_np: current or future joint angles."""
+        F = kdl.Frame()
+        self.fk_solver.JntToCart(self._to_kdl_jnt_array(q_np), F)
+        isok = F.p.z() >= self.floor_z_margin
+        if not isok:
+            rospy.logwarn(f"[VC] Next joint q violates floor constraint: {self.floor_z_margin}. Zeroing velocities.")
+        return isok
 
-    def _publish_velocity(self, q_dot_cmd):
-        """ Publish joint velocity command to the robot."""
-        msg = Float64MultiArray()
-        msg.data = q_dot_cmd.tolist()
-        self.vel_pub.publish(msg)
+    # =====================================================================
+    #   PUBLIC API
+    # =====================================================================
 
-
-    def _frame_from_xyz_rpy(self, xyz, rpy):
+    def move_to_joint_positions(self, q_target, timeout=5.0, tol=1e-3, bypass_floor=False):
         """
-        Build a KDL.Frame from position + RPY (in radians), all in BASE frame.
+        Drive joints to q_target using a simple velocity P-controller.
 
-        xyz: [x, y, z]
-        rpy: [roll, pitch, yaw]
+        q_target: list/np.array of target joint angles (rad),
+                  same order as self.joint_names.
+        timeout:  seconds before giving up.
+        tol:      norm of joint error to consider 'done'.
+        bypass_floor: if True, bypass the floor_z safety check.
         """
-        x, y, z = xyz
-        rr, rp, ry = rpy
-        R = kdl.Rotation.RPY(rr, rp, ry)
-        p = kdl.Vector(x, y, z)
-        return kdl.Frame(R, p)
+        q_target = np.asarray(q_target, dtype=float)
+
+        # ---------- SAFETY: check floor_z constraint ----------
+        if not self._floor_constraint_isok(q_target):
+            raise RuntimeError(f"[VC] Refusing move_to_joint_positions to target {q_target}")
+
+        kp = self.kp_joints
+        kp_joints = np.array([kp, kp, kp, kp, kp*1.5, kp])
+        kd = self.kd_joints
+        kd_joints = np.array([kd, kd, kd, kd, kd*2.0, kd])
+        ki = self.ki_joints
+        ki_joints = np.array([ki, ki, ki, ki, ki*1.5, ki])
+
+        rospy.loginfo(f"[VC] move_to_joint_positions:\n{q_target}")
+
+        _wait_for_egm_active(target_active=True, timeout=5.0)
+
+        start_time = rospy.Time.now()
+        stop_reason = None
+
+        ## =========================== MOTION LOOP ============================
+        while not rospy.is_shutdown():
+            elapsed = (rospy.Time.now() - start_time).to_sec()
+
+            with self._state_lock:
+                q_curr = self._q.copy()
+            if q_curr is None:
+                self.rate.sleep()
+                continue
+
+            if elapsed > timeout:
+                rospy.logwarn(f"[VC] move_to_joint_positions timed out. Joint errors:\n"
+                              f"{q_target - q_curr}, norm={np.linalg.norm(q_target - q_curr)}")
+                break
+
+            # ----- PID control -----
+            # Compute error
+            err = q_target - q_curr
+            # Check for convergence
+            if np.linalg.norm(err) < tol:
+                rospy.loginfo("[VC] Joint target reached. Joint errors:\n"
+                              f"{q_target - q_curr}")
+                stop_reason = 1 # 'good' stop
+                break
+
+            # Integral and anti-windup
+            self.err_I += err * self.dt
+            self.err_I = np.clip(self.err_I, -self.I_max, self.I_max)
+            # Derivative
+            err_D = (err - self.err_prev) / self.dt
+
+            vel_raw = kp_joints * err + ki_joints * self.err_I + kd_joints * err_D
+            self.err_prev = err.copy()
+            # -----------------------
+
+            # Enforce max joint velocity scaling
+            max_abs = float(np.max(np.abs(vel_raw)))
+            if max_abs > self.max_joint_vel:
+                scale = self.max_joint_vel / max_abs
+                vel_raw *= scale
+
+            q_dot_cmd = vel_raw
+            q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
+            q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
+            # -------------- SAFETY: check floor_z constraint ----------
+            if not bypass_floor and not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt):
+                stop_reason = "floor_z constraint violated."
+                break
+
+            self._publish_velocity(q_dot_cmd)
+            self.rate.sleep()
+
+        ## =========================== END MOTION LOOP ============================
+
+        # Stop motion
+        self._publish_velocity(np.zeros(self.nj))
+        _wait_for_egm_active(target_active=False, timeout=5.0)
+
+        return True if stop_reason == 1 else False
 
 
-    def _ik_position(self, xyz, rpy, q_seed=None):
+    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True, lock_z=True):
+        """
+        Apply a constant Cartesian twist for 'duration' seconds.
+
+        v: [vx, vy, vz] in BASE frame (m/s)
+        w: [wx, wy, wz] in BASE frame (rad/s)
+        duration: seconds
+        """
+        v, w = np.array(v), np.array(w)
+        xyz_init, M_des, _ = self._get_tip_pose()
+        if xyz_init is None or M_des is None: raise RuntimeError("[VC] No FK for Cartesian start")
+        z_des = xyz_init[2]
+
+        if not np.allclose(w, 0.0, atol=1e-6):
+            lock_orient = False
+            rospy.logwarn("[VC] Non-zero angular velocity requested; disabling orientation lock.")
+
+        rospy.loginfo(f"[VC] Cartesian requested: v={v}, w={w}, duration={duration}")
+
+        _wait_for_egm_active(target_active=True, timeout=5.0)
+
+        start_time = rospy.Time.now()
+        early_stop_reason = None # For logging
+
+        ## ============================ CARTESIAN MOTION LOOP ============================
+        while not rospy.is_shutdown():
+            elapsed = (rospy.Time.now() - start_time).to_sec()
+            if elapsed > duration: 
+                early_stop_reason = None # Normal completion
+                break
+
+            if force_watcher and force_watcher.trigger:
+                early_stop_reason = 1 # 'good' stop
+                break
+
+            with self._state_lock:
+                q_curr = self._q.copy()
+            if q_curr is None:
+                self.rate.sleep()
+                continue
+
+            # Allow initial settling, then record baseline. Until then, force it back to MONITOR
+            if force_watcher and elapsed < 0.3:
+                    force_watcher.reset(force_state="MONITOR")
+            else:
+                rospy.loginfo_once("[VC] Force watcher is active and Monitoring!!")
+
+            # ----------- Cartesian corrections (orient and z-lock) -----------
+            xyz_curr, M_curr, _ = self._get_tip_pose()
+            if xyz_curr is None or M_curr is None:
+                rospy.logwarn_throttle(1.0, "[VC] No FK during Cartesian motion. Stopping motion for one cycle.")
+                self._publish_velocity(np.zeros(self.nj))
+                self.rate.sleep()
+                continue
+
+            v_cmd, w_cmd = v.copy(), w.copy()
+
+            # FIRST build the linear component of the twist command (with z lock if enabled)
+            if lock_z:
+                vz_corr = self.kp_zlock * (z_des - xyz_curr[2]) # simple P control on Z
+                # vz_corr = np.clip(vz_corr, -0.05, 0.05) # OPTIONAL clamp
+                v_cmd[2] += vz_corr
+
+            # SECOND determine angular component (w_cmd)
+            if lock_orient: # ONLY runs if w_des was zero
+                err_rot = (M_curr.Inverse() * M_des).GetRot() # rot vec representation
+                w_cmd = self.kp_orient * np.array([err_rot[0], err_rot[1], err_rot[2]], dtype=float)
+            # ---------------------------------------------------------------
+
+            # Compute joint velocities via KDL velocity IK
+            q_dot_cmd = self._ik_velocity(q_curr, np.concatenate([v_cmd, w_cmd]))
+            q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
+            q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
+
+            # -------------- SAFETY: check floor_z constraint ----------
+            if not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt):
+                early_stop_reason = "floor_z constraint violated."
+                break
+
+            self._publish_velocity(q_dot_cmd)
+            self.rate.sleep()
+        ## ============================ END CARTESIAN MOTION LOOP ============================
+
+        # Stop after duration
+        self._publish_velocity(np.zeros(self.nj))
+
+        # Record how long this took so we can 'undo' it in parent function
+        self.last_cartesian_duration = (rospy.Time.now() - start_time).to_sec()
+
+        _wait_for_egm_active(target_active=False, timeout=5.0)
+        
+        if early_stop_reason is None:
+            return True
+        if early_stop_reason==1:
+            rospy.loginfo(f"[VC] Stopped due to force < f_safe.")
+            return True
+        else:
+            rospy.logwarn(f"[VC] Stopped due to: {early_stop_reason}")
+            return False
+
+
+    # def move_to_pose(self, xyz, rpy, timeout=5.0, kp=2.0, tol=1e-3, q_seed=None):
+    #     """
+    #     Solve IK for (xyz, rpy) and then move there using move_to_joint_positions.
+
+    #     xyz, rpy: pose in BASE frame.
+
+    #     ************************** UNTESTED UNTESTED UNTESTED *******************************
+    #     """
+    #     q_target = self.ik_position(xyz, rpy, q_seed=q_seed)
+    #     return self.move_to_joint_positions(
+    #         q_target=q_target,
+    #         timeout=timeout,
+    #         kp=kp,
+    #         tol=tol,
+    #     )
+
+    def ik_position(self, xyz, rpy, q_seed=None):
         """
         Solve joint positions for a desired pose (xyz, rpy) using joint-limited IK.
 
@@ -678,7 +553,14 @@ class VelocityController:
         q_seed: optional initial guess (np.array length nj). If None, use current q.
         Returns: np.array length nj (joint angles) or raises RuntimeError on failure.
         """
-        F_des = self._frame_from_xyz_rpy(xyz, rpy)
+        xyz = np.asarray(xyz, dtype=float)
+        rpy = np.asarray(rpy, dtype=float)
+        if xyz.shape != (3,) or rpy.shape != (3,):
+            raise ValueError("xyz and rpy must each be length 3")
+        
+        p = kdl.Vector(xyz[0], xyz[1], xyz[2])
+        R = kdl.Rotation.RPY(rpy[0], rpy[1], rpy[2])
+        F_des = kdl.Frame(R, p)
 
         # Seed
         if q_seed is None:
@@ -705,51 +587,3 @@ class VelocityController:
         for i in range(self.nj):
             q_sol[i] = q_sol_kdl[i]
         return q_sol
-    
-
-    def _fk_position(self, q_np):
-        """FK to the current tip Frame (now finger_tip)"""
-        q_kdl = self._to_kdl_jnt_array(q_np)
-        FK = kdl.Frame()
-        self.fk_solver.JntToCart(q_kdl, FK)
-        return FK
-    
-    def _tip_pose(self, q_np):
-        """
-        Get the current fingertip pose (xyz, M) in BASE frame.
-        """
-        F_tip = self._fk_position(q_np)
-        p = F_tip.p
-        xyz = np.array([p[0], p[1], p[2]])
-        # quat = F_tip.M.GetQuaternion()
-        return xyz, F_tip.M #quat
-    
-    def _floor_constraint_isok(self, q_np):
-        """Return True if fingertip Z is above floor_z_margin.
-        q_np: np.array of current or future joint angles.
-        """
-        pos, _ = self._tip_pose(q_np)
-        return pos[2] >= self.floor_z_margin
-    
-
-    def _get_EE_xyz_M(self):
-        """
-        Return (xyz_np, M_kdl, age_sec) from subscribed FK pose.
-        If missing or stale, return (None, None, None).
-        """
-        pose, t = self._get_EE_pose()
-        if pose is None:
-            return None, None, None
-
-        age = rospy.Time.now().to_sec() - t
-        if age > self.ee_max_age:
-            rospy.logwarn_throttle(
-                self.ee_warn_throttle_sec,
-                f"[VC] EE FK pose too old (age={age*1000:.2f} ms > {self.ee_max_age*1000:.2f} ms)."
-            )
-            return None, None, age
-
-        xyz = pose[0:3].copy()
-        qx, qy, qz, qw = pose[3:7]
-        M = kdl.Rotation.Quaternion(float(qx), float(qy), float(qz), float(qw))
-        return xyz, M, age

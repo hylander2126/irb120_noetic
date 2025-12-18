@@ -255,13 +255,13 @@ class FTClockLogger:
     
     def _on_fw_contact(self, msg: Bool):
         with self.csv_lock:
-            if msg.data:
-                self.ft_contact_flag = 1
+            if self.recording:
+                self.ft_contact_flag = 1 if msg.data else 0
 
     def _on_fw_trigger(self, msg: Bool):
         with self.csv_lock:
-            if msg.data:
-                self.ft_trigger_flag = 1
+            if self.recording:
+                self.ft_trigger_flag = 1 if msg.data else 0
 
     def _on_tip_pose(self, msg: PoseStamped):
         t = msg.header.stamp.to_sec() if msg.header.stamp else rospy.Time.now().to_sec()
