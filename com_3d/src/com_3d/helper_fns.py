@@ -20,6 +20,141 @@ import numpy as np
 '''
 *** HYLAND ADDED FUNCTIONS ***
 '''
+
+def enforce_quat_continuity(Q, eps=1e-12, normalize=True):
+    """
+    Enforces quaternion sign continuity AND forward-fills missing/invalid quaternions.
+
+    - Any quaternion with norm < eps is treated as invalid (e.g., [0,0,0,0] when tag not detected)
+      and is replaced via forward-fill from the last valid quaternion.
+    - If the first samples are invalid, they are back-filled with the first valid quaternion.
+    - After filling, enforces sign continuity so consecutive quaternions have non-negative dot product.
+    - Optionally normalizes to unit quaternions (recommended for scipy Rotation).
+
+    Parameters
+    ----------
+    Q : (N,4) array-like
+        Quaternion sequence (assumed xyzw for scipy).
+    eps : float
+        Threshold below which a quaternion is considered invalid.
+    normalize : bool
+        If True, normalize quaternions to unit length after filling.
+
+    Returns
+    -------
+    Q_out : (N,4) ndarray
+        Cleaned quaternion sequence.
+    """
+    Q = np.asarray(Q, dtype=float).copy()
+
+    if Q.ndim != 2 or Q.shape[1] != 4:
+        raise ValueError(f"Expected Q shape (N,4), got {Q.shape}")
+
+    norms = np.linalg.norm(Q, axis=1)
+    valid = norms >= eps
+
+    if not np.any(valid):
+        raise ValueError("No valid quaternions found (all norms are ~0). Check your CSV columns/logging.")
+
+    # --- Back-fill leading invalid rows with first valid quaternion ---
+    first_valid = np.argmax(valid)  # index of first True
+    if first_valid > 0:
+        Q[:first_valid] = Q[first_valid]
+
+    # --- Forward-fill invalid rows ---
+    for i in range(first_valid + 1, len(Q)):
+        if not valid[i]:
+            Q[i] = Q[i - 1]
+
+    # --- Normalize (good hygiene for scipy Rotation) ---
+    if normalize:
+        norms = np.linalg.norm(Q, axis=1)
+        # After fill, norms should be nonzero, but guard anyway
+        bad2 = norms < eps
+        if np.any(bad2):
+            # Shouldn't happen unless numeric weirdness; fall back to previous again
+            for i in range(1, len(Q)):
+                if bad2[i]:
+                    Q[i] = Q[i - 1]
+            norms = np.linalg.norm(Q, axis=1)
+        Q /= norms[:, None]
+
+    # --- Enforce sign continuity (avoid sudden flips) ---
+    for i in range(1, len(Q)):
+        if np.dot(Q[i], Q[i - 1]) < 0:
+            Q[i] *= -1
+
+    return Q
+
+
+def quat_to_axis_angle(Q):
+    """
+    Q: (N,4) array of quaternions [qx, qy, qz, qw]
+    Returns:
+        axis  : (N,3)
+        angle : (N,)
+    """
+    Q = np.asarray(Q, dtype=float)
+
+    # normalize
+    Q = Q / np.linalg.norm(Q, axis=1, keepdims=True)
+
+    x = Q[:, 0]
+    y = Q[:, 1]
+    z = Q[:, 2]
+    w = np.clip(Q[:, 3], -1.0, 1.0)
+
+    angle = 2.0 * np.arccos(w)
+
+    s = np.sqrt(1.0 - w*w)  # = |sin(angle/2)|
+
+    axis = np.zeros((len(Q), 3))
+    mask = s > 1e-8
+    axis[mask, 0] = x[mask] / s[mask]
+    axis[mask, 1] = y[mask] / s[mask]
+    axis[mask, 2] = z[mask] / s[mask]
+
+    return axis, angle
+
+
+def quat_normalize(q):
+    q = np.asarray(q, dtype=float)
+    n = np.linalg.norm(q)
+    if not np.isfinite(n) or n < 1e-12:
+        return np.array([np.nan, np.nan, np.nan, np.nan])
+    return q / n
+
+def quat_conj(q):  # [x,y,z,w]
+    return np.array([-q[0], -q[1], -q[2], q[3]], dtype=float)
+
+def quat_mul(q1, q2):  # Hamilton product, [x,y,z,w]
+    x1,y1,z1,w1 = q1
+    x2,y2,z2,w2 = q2
+    return np.array([
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2
+    ], dtype=float)
+
+def quat_to_rotvec(q):  # returns rotation vector (axis * angle), radians
+    # assumes q is unit and represents rotation from reference to current
+    q = quat_normalize(q)
+    if np.any(~np.isfinite(q)):
+        return np.array([np.nan, np.nan, np.nan])
+
+    x,y,z,w = q
+    w = np.clip(w, -1.0, 1.0)
+    angle = 2.0 * np.arccos(w)
+    s = np.sqrt(max(0.0, 1.0 - w*w))  # = sin(angle/2)
+
+    if s < 1e-8 or angle < 1e-8:
+        return np.array([0.0, 0.0, 0.0])
+
+    axis = np.array([x, y, z]) / s
+    return axis * angle
+
+
 def screw_to_se3(S):
         """Converts a 6-vector screw S=[v, w] to its 4x4 matrix representation [S]."""
         w = S[3:]

@@ -5,9 +5,11 @@
   <arg name="load_robot_description" default="true"/>
   <arg name="debug" default="false"/> <arg name="info" default="true"/> 
   <arg name="netft_ip" default="192.168.126.125"/>
-  <!-- <arg name="run_base"/> -->
   <arg name="tag_ns" default="cont_detect"/>
 
+  <!-- online estimator config -->
+  <arg name="enable_online_estimator" default="true"/>
+  <arg name="enable_live_plot" default="true"/>
 
   <!-- ############################## -->
   <!-- ### Robot Hardware Bringup ### -->
@@ -69,12 +71,12 @@
   </node>
 
   <!-- Visualize using rqt_image_viewer -->
-  <node pkg="rqt_image_view" type="rqt_image_view" name="view_tag_overlay" output="screen"
+  <!-- <node pkg="rqt_image_view" type="rqt_image_view" name="view_tag_overlay" output="screen"
     args="/tag_detections_image">
     <param name="image_transport" value="raw"/>
-  </node>
+  </node> -->
 
-  <!-- Shutdown Handler (cleanup on exit) -->
+  <!-- Shutdown Handler (cleanup on exit) DEACTIVATED FOR NOW, DOESN'T DO ANYTHING-->
   <!-- <node pkg="com_3d" type="shutdown_handler.py" name="shutdown_handler" output="screen"/> -->
 
 
@@ -89,10 +91,51 @@
     <!-- video/overlay config -->
     <param name="tag_max_age" value="0.10"/>
     <param name="fps_hint"      value="30"/> <!-- Camera-specific (I think. Stick to 30fps for now.)-->
-    <!-- <param name="warmup_frames" value="10"/> --> <!-- TESTING WITHOUT WARMUP FRAMES SINCE WE OPEN LIVESTREAM IMMMEDIATELY, I DONT' THINK WE NEED THIS-->
   </node>
 
   <!-- Run the FK tip pose publisher -->
   <node pkg="com_3d" type="fk_tip_publisher.py" name="fk_tip_publisher" output="screen"/>
+
+
+  <!-- ############################### -->
+  <!-- #### TRUE STREAMING ESTIMATE ### -->
+  <!-- ############################### -->
+  <group if="$(arg enable_online_estimator)">
+    <node pkg="com_3d" type="streaming_estimator.py" name="streaming_estimator" output="screen">
+      <!-- where to read live streams -->
+      <param name="ft_stream_topic" value="/netft_data_transformed"/>
+      <param name="tag_topic" value="/tag_detections"/>
+      <param name="tip_pose_topic" value="/com_3d/tip_pose_fk"/>
+
+      <!-- 500 Hz ingest; estimation uses decimation + fixed window-->
+      <param name="fs_hz" value="500"/>
+      <param name="est_decimate" value="5"/>
+      <param name="est_window_size" value="250"/>
+      <param name="est_update_hz" value="5"/>
+
+      <!-- Causal filtering (median + butter LPF). Apply to BOTH force and rotvec -->
+      <param name="force_medwin" value="5"/>
+      <param name="force_cutoff_hz" value="5.0"/>
+      <param name="force_order" value="4"/>
+      <param name="rotvec_medwin" value="5"/>
+      <param name="rotvec_cutoff_hz" value="5.0"/>
+      <param name="rotvec_order" value="4"/>
+
+      <!-- tag frame correction (optional) -->
+      <rosparam param="tag_cam_to_world_euler_deg">[0.0, 0.0, 0.0]</rosparam>
+    </node>
+  </group>
+
+  <!-- ############################### -->
+  <!-- ######## LIVE PLOT (GUI) ###### -->
+  <!-- ############################### -->
+
+  <node if="$(arg enable_live_plot)"
+        pkg="com_3d"
+        type="live_fit_plotter.py"
+        name="live_fit_plotter"
+        output="screen">
+    <param name="update_hz" value="5"/>
+  </node>
   
 </launch>
