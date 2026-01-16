@@ -16,13 +16,13 @@ class ForceWatcher:
     """
     def __init__(
             self,
-            k_safe=0.9,
+            n_safety=0.9, # n_safety = 0 is NO safety and =1 is FULL safety (stop push upon contact)
             baseline_window=50,
             median_window=5,
             debug=False,
             initial_state=None # (i.e. for starting baseline after motion)
         ):
-        self.k_safe = k_safe
+        self.n_safety = n_safety
         self.debug = debug
         self.min_force_close_zero = 0.14 # (was 0.03) N below this is basically zero, robot jerks at first this avoids an early stop
 
@@ -63,16 +63,28 @@ class ForceWatcher:
 
         # Looks like lshape (lightest) has peaks F: 0.117 -> 0.128 -> 0.248 -> 0.331
         
-        rospy.loginfo(f"[ForceWatcher] Armed with k_safe={self.k_safe}.")
+        rospy.loginfo(f"[ForceWatcher] Armed with k_safe={self.n_safety}.")
 
 
     def ft_cb(self, msg):
         # Bail out if shutdown
         if rospy.is_shutdown():
             return
-        # Publish contact and trigger events continuously
+        # Publish contact and trigger events continuously.
+        #
+        # IMPORTANT:
+        #   Downstream (streaming_estimator.py) uses /com_3d/fw_contact_status
+        #   as a boolean *mask* to decide which samples are "valid tipping".
+        #   If we only publish True for STATE == "CONTACT", that window can be
+        #   just a handful of samples (e.g., if force drops quickly and we
+        #   transition to TRIGGERED almost immediately). That makes the batch
+        #   fitter think contact never happened.
+        #
+        # We therefore define "contact active" as being in the post-contact
+        # phase where force is meaningful for torque fitting: PEAK + CONTACT.
         try:
-            self.pub_contact.publish(self.STATE == "CONTACT")
+            contact_active = (self.STATE in ["PEAK", "CONTACT"])
+            self.pub_contact.publish(contact_active)
             self.pub_trigger.publish(self.STATE == "TRIGGERED")
         except rospy.ROSException:
             return
@@ -112,20 +124,17 @@ class ForceWatcher:
                 df = f_med - prev_med # current (smoothed) minus previous
             
             cond1 = f_med > (self.noise_floor + self.contact_delta)
-            # self.debug_msg(f"f_med is: {f_med:.3f}")
-            # cond2 = True # TEMP DISABLING     df > self.contact_slope:
+            
             cond2 = True #f_med > (self.noise_floor + self.min_force_close_zero) # TEMP testing to avoid tiny forces (robot jerk) detecting as contact
             if cond1 and cond2:
                 self.contact_count += 1
                 self.debug_msg(f"Contact magnitude met: f_med={f_med:.3f} N, (contact_delta={self.contact_delta:.3f})") if cond1 else None
-                # self.debug_msg(f"Min slope met (TEMP check disabled)")
                 self.debug_msg(f"Contact count: {self.contact_count}/{self.contact_samples}")
                 if self.contact_count >= self.contact_samples:
                     self.STATE = "PEAK"
                     self.debug_msg(f"{self.contact_count} CONTACTS DETECTED!", 0)
             else:
                 self.contact_count = 0
-                # self.debug_msg(f"""Contact magnitude NOT met: \nf_med={f_med:.3f} <= noise floor+delta={self.noise_floor+self.contact_delta:.3f} N \nContact count reset.""", 0.1)
 
         # ------------ 3) PEAK TRACKING ------------
         if self.STATE == "PEAK":
@@ -133,22 +142,15 @@ class ForceWatcher:
             self.peak_buf.pop(0)
             self.peak_buf.append(f_med)
             if self.peak_buf.count(0.0) == 0:
-                # self.debug_msg(f"Peak buffer looks like: {np.round(self.peak_buf, 3)}")
                 self.peak = float(np.max(self.peak_buf))
                 self.debug_msg(f"Peak force recorded: {self.peak:.3f} N")
                 self.STATE = "CONTACT"
-                # self.pub_contact.publish(Empty())
 
 
         # ------------ 3) CONTACT / PEAK TRACING ------------
         if self.STATE == "CONTACT":
-            # # Require valid peak before checking fall
-            # if self.peak <= 0.0:
-            #     self.prev_med = f_med
-            #     # pass
 
-            # thresh = (1.0 - self.k_safe) * self.peak
-            f_safe = self.peak - (self.k_safe * self.peak)
+            f_safe = self.n_safety * self.peak
             thresh = np.max([f_safe, self.noise_floor])
             if thresh != f_safe:
                 self.debug_msg(f"Adjusted f_safe to noise floor: {thresh:.3f} N (original f_safe: {f_safe:.3f} N, noise floor: {self.noise_floor:.3f} N)", 0)

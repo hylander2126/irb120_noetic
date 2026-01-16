@@ -42,6 +42,8 @@
   <include file="$(find com_3d)/launch/live_netft.launch">
       <arg name="apply_transform" value="false"/> <!-- TRUE -->
       <arg name="apply_bias" value="true"/>
+      <arg name="live_rqt" value="false"/> <!-- TRUE -->
+      <arg name="hack_transform" value="true"/>
     </include>
 
   <!-- ############################### -->
@@ -71,10 +73,10 @@
   </node>
 
   <!-- Visualize using rqt_image_viewer -->
-  <!-- <node pkg="rqt_image_view" type="rqt_image_view" name="view_tag_overlay" output="screen"
+  <node pkg="rqt_image_view" type="rqt_image_view" name="view_tag_overlay" output="screen"
     args="/tag_detections_image">
     <param name="image_transport" value="raw"/>
-  </node> -->
+  </node>
 
   <!-- Shutdown Handler (cleanup on exit) DEACTIVATED FOR NOW, DOESN'T DO ANYTHING-->
   <!-- <node pkg="com_3d" type="shutdown_handler.py" name="shutdown_handler" output="screen"/> -->
@@ -93,8 +95,8 @@
     <param name="fps_hint"      value="30"/> <!-- Camera-specific (I think. Stick to 30fps for now.)-->
   </node>
 
-  <!-- Run the FK tip pose publisher -->
-  <node pkg="com_3d" type="fk_tip_publisher.py" name="fk_tip_publisher" output="screen"/>
+  <!-- Run the FK tip pose publisher UNUSED IN ANY CODE AS OF 01/16/26 -->
+  <!-- <node pkg="com_3d" type="fk_tip_publisher.py" name="fk_tip_publisher" output="screen"/> -->
 
 
   <!-- ############################### -->

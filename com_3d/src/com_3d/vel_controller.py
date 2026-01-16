@@ -15,60 +15,9 @@ from urdf_parser_py.urdf import URDF
 from kdl_parser_py.urdf import treeFromUrdfModel
 import PyKDL as kdl
 
-# def _start_egm_wait_till_active(timeout=5.0):
-#     """
-#     Blocks until the EGM controller reports "active: True" for at least one channel.
-#     """
-#     # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
-#     t_start = rospy.Time.now()
-
-#     while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
-#         try:
-#             # Wait for a single message with a short timeout to prevent blocking
-#             msg = rospy.wait_for_message("/egm/egm_states", EGMState, timeout=0.1)
-#         except rospy.ROSException:
-#             continue # Timeout or shutdown occurred while waiting for the message
-#         if not msg.egm_channels:
-#             continue # The message is empty, which shouldn't happen but skip if it does
-
-#         # Now try to start the EGM
-#         _start_egm()
-
-#         # Check if OUR channel reports active: True
-#         our_channel = msg.egm_channels[0]
-#         if our_channel.active:
-#             # rospy.loginfo("[EGM Wait] Status 'active: True' detected.")
-#             return True
-#     raise RuntimeError("EGM did not become active within timeout.")
-
-# def _stop_egm_wait_till_active(timeout=5.0):
-#     """
-#     Blocks until the EGM controller reports "active: False" for at least one channel.
-#     """
-#     # rospy.loginfo(f"[EGM Wait] Waiting for active state on {EGM_STATES_TOPIC}...")
-#     t_start = rospy.Time.now()
-
-#     while (rospy.Time.now() - t_start).to_sec() < timeout and not rospy.is_shutdown():
-#         try:
-#             # Wait for a single message with a short timeout to prevent blocking
-#             msg = rospy.wait_for_message("/egm/egm_states", EGMState, timeout=0.1)
-#         except rospy.ROSException:
-#             continue # Timeout or shutdown occurred while waiting for the message
-#         if not msg.egm_channels:
-#             continue # The message is empty, which shouldn't happen but skip if it does
-
-#         # Now try to start the EGM
-#         _stop_egm()
-
-#         # Check if OUR channel reports active: False
-#         our_channel = msg.egm_channels[0]
-#         if not our_channel.active:
-#             # rospy.loginfo("[EGM Wait] Status 'active: False' detected.")
-#             return True
-#     raise RuntimeError("EGM did not become active within timeout.")
-
 EGM_START_SRV = "/rws/sm_addin/start_egm_joint"
 EGM_STOP_SRV  = "/rws/sm_addin/stop_egm"
+
 
 def _wait_for_egm_active(target_active=True, timeout=5.0):
     """Blocks until EGM state matches target_active."""
@@ -87,20 +36,6 @@ def _wait_for_egm_active(target_active=True, timeout=5.0):
     raise RuntimeError(f"EGM did not reach active={target_active} within timeout.")
 
 
-# def _start_egm():
-#     rospy.wait_for_service("/rws/sm_addin/start_egm_joint")
-#     try:
-#         rospy.ServiceProxy("/rws/sm_addin/start_egm_joint", TriggerWithResultCode)(TriggerWithResultCode._request_class())
-#     except Exception as e:
-#         rospy.logwarn(f"start_egm call failed: {e}")
-
-# def _stop_egm():
-#     rospy.wait_for_service("/rws/sm_addin/stop_egm")
-#     try:
-#         rospy.ServiceProxy("/rws/sm_addin/stop_egm", TriggerWithResultCode)(TriggerWithResultCode._request_class())
-#     except Exception as e:
-#         rospy.logwarn(f"stop_egm call failed: {e}")
-
 def _call_egm_service(service_name):
     """Generic safe service caller for EGM commands."""
     try:
@@ -108,12 +43,6 @@ def _call_egm_service(service_name):
         rospy.ServiceProxy(service_name, TriggerWithResultCode)(TriggerWithResultCode._request_class()) # second parentheses calls the service
     except (rospy.ServiceException, rospy.ROSInterruptException, rospy.ROSException) as e:
         rospy.logwarn(f"[VC] EGM Service call failed ({service_name}): {e}")
-
-def arm_logs():
-    rospy.Publisher('/com_3d/log_start', Empty, queue_size=1, latch=True).publish(Empty())
-
-def disarm_logs():
-    rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
 
 
 class VelocityController:
@@ -152,7 +81,7 @@ class VelocityController:
         self.floor_z_margin      = float(floor_z_margin)
 
         # FK state tracking
-        self.ee_max_age                 = 0.02 # 20 ms
+        self.ee_max_age                 = 0.1 # 100 ms --> used to be 0.02 # 20 ms but too strict
         self.last_cartesian_duration    = None
 
         # Joint goal gains
@@ -303,6 +232,23 @@ class VelocityController:
         for i in range(self.nj):
             dq[i] = dq_kdl[i]
         return dq
+    
+    def _kdl_rotation_from_quat(self, quat):
+        """
+        Return PyKDL.Rotation from quaternion [x,y,z,w].
+        """
+        quat = np.asarray(quat, dtype=float).reshape(-1)
+        if quat.shape != (4,):
+            raise ValueError("quat must be length 4 [x, y, z, w]")
+
+        n = float(np.linalg.norm(quat))
+        if n < 1e-12:
+            raise ValueError("quat has ~zero norm")
+        quat = quat / n
+
+        return kdl.Rotation.Quaternion(
+            float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+        )
 
     def _apply_joint_limit_avoidance(self, q_curr, q_dot_cmd):
         """
@@ -337,7 +283,7 @@ class VelocityController:
     #   PUBLIC API
     # =====================================================================
 
-    def move_to_joint_positions(self, q_target, timeout=5.0, tol=1e-3, bypass_floor=False):
+    def move_to_joint_positions(self, q_target, timeout=5.0, tol=4e-3, bypass_floor=False):
         """
         Drive joints to q_target using a simple velocity P-controller.
 
@@ -529,37 +475,37 @@ class VelocityController:
             return False
 
 
-    # def move_to_pose(self, xyz, rpy, timeout=5.0, kp=2.0, tol=1e-3, q_seed=None):
-    #     """
-    #     Solve IK for (xyz, rpy) and then move there using move_to_joint_positions.
-
-    #     xyz, rpy: pose in BASE frame.
-
-    #     ************************** UNTESTED UNTESTED UNTESTED *******************************
-    #     """
-    #     q_target = self.ik_position(xyz, rpy, q_seed=q_seed)
-    #     return self.move_to_joint_positions(
-    #         q_target=q_target,
-    #         timeout=timeout,
-    #         kp=kp,
-    #         tol=tol,
-    #     )
-
-    def ik_position(self, xyz, rpy, q_seed=None):
+    def move_to_pose(self, xyz, quat, timeout=5.0, tol=4e-3, q_seed=None):
         """
-        Solve joint positions for a desired pose (xyz, rpy) using joint-limited IK.
+        Solve IK for (xyz, quat) and then move there using move_to_joint_positions.
 
-        xyz, rpy in BASE frame.
+        xyz, quat: pose in BASE frame.
+        ************************** UNTESTED UNTESTED UNTESTED *******************************
+        """
+        q_target = self.ik_position(xyz, quat=quat, q_seed=q_seed)
+
+        success = self.move_to_joint_positions(
+                q_target=q_target,
+                timeout=timeout,
+                tol=tol,
+                bypass_floor=False
+            )
+        return success
+
+    def ik_position(self, xyz, quat, q_seed=None):
+        """
+        Solve joint positions for a desired pose (xyz, quat(xyzw)) using joint-limited IK.
+
+        xyz, quat in BASE frame.
         q_seed: optional initial guess (np.array length nj). If None, use current q.
         Returns: np.array length nj (joint angles) or raises RuntimeError on failure.
         """
         xyz = np.asarray(xyz, dtype=float)
-        rpy = np.asarray(rpy, dtype=float)
-        if xyz.shape != (3,) or rpy.shape != (3,):
-            raise ValueError("xyz and rpy must each be length 3")
+        if xyz.shape != (3,):
+            raise ValueError("xyz must be length 3")
         
+        R = self._kdl_rotation_from_quat(quat)
         p = kdl.Vector(xyz[0], xyz[1], xyz[2])
-        R = kdl.Rotation.RPY(rpy[0], rpy[1], rpy[2])
         F_des = kdl.Frame(R, p)
 
         # Seed

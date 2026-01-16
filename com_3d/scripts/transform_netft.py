@@ -16,6 +16,7 @@ class FTTransformer:
         self.output_topic   = rospy.get_param('~output_topic', '/netft_data_transformed')
         self.apply_bias     = rospy.get_param('~apply_bias', True)
         self.apply_transform= rospy.get_param('~apply_transform', True)
+        self.hack_transform = rospy.get_param('~hack_transform', False)
         self.bias_samples   = 150
 
         # HACK: Use a static rotation for our specific setup
@@ -93,6 +94,11 @@ class FTTransformer:
             # Apply fixed transform:
             transformed_F = self.R @ f_final
             transformed_T = self.R @ t_final
+        elif self.hack_transform: # Legacy hack for old IRB120 setup (correcting axes manually)
+            temp_F = f_final.copy()
+            temp_T = t_final.copy()
+            transformed_F = np.array([temp_F[2], temp_F[0], temp_F[1]]) # Z, X, Y
+            transformed_T = np.array([temp_T[2], temp_T[0], temp_T[1]]) # Z, X, Y
         else:
             transformed_F = f_final
             transformed_T = t_final

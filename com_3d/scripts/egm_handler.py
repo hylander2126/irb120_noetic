@@ -136,12 +136,12 @@ def main():
     rospy.on_shutdown(shutdown_hook)
 
     # 0. AS BACKUP, STOP EGM (EVEN IF EGM ISN'T RUNNING)
-    rospy.loginfo("[EGM_handler] Stopping EGM (if running)...")
+    # rospy.loginfo("[EGM_handler] Stopping EGM (if running)...")
     result_code, result_message = call_trigger(EGM_STOP_SRV, SLEEP=1.0)
     rospy.loginfo(f"[EGM_handler] Stopping EGM result: {result_code}, message: {result_message}")
 
     # 1. STOP EVERYTHING if running
-    rospy.loginfo("[EGM_handler] Stopping RAPID...")
+    # rospy.loginfo("[EGM_handler] Stopping RAPID...")
     result_code, result_message = call_trigger(RAPID_STOP_SRV, SLEEP=1.0)
     rospy.loginfo(f"[EGM_handler] Stopping RAPID result: {result_code}, message: {result_message}")
 
@@ -151,19 +151,19 @@ def main():
     # rospy.loginfo(f"[EGM_handler] Set EGM settings result: {result_code}, message: {result_message}")
 
     # 3. RESET RAPID POINTER TO MAIN
-    rospy.loginfo("[EGM_handler] Resetting RAPID pointer to MAIN...")
+    # rospy.loginfo("[EGM_handler] Resetting RAPID pointer to MAIN...")
     result_code, result_message = call_trigger(PP_TO_MAIN_SRV, SLEEP=1.0)
     rospy.loginfo(f"[EGM_handler] PP to Main result: {result_code}, message: {result_message}")
 
     # 4. START RAPID
-    rospy.loginfo("[EGM_handler] Starting RAPID...")
+    # rospy.loginfo("[EGM_handler] Starting RAPID...")
     result_code, result_message = call_trigger(RAPID_START_SRV, SLEEP=2.0)
     rospy.loginfo(f"[EGM_handler] Start RAPID result: {result_code}, message: {result_message}")
 
 
 
     # 2. SET EGM SETTINGS while RAPID is stopped
-    rospy.loginfo("[EGM_handler] Setting EGM settings...")
+    # rospy.loginfo("[EGM_handler] Setting EGM settings...")
     result_code, result_message = set_egm_settings()
     rospy.loginfo(f"[EGM_handler] Set EGM settings result: {result_code}, message: {result_message}")
     rospy.sleep(1.0)
@@ -171,7 +171,7 @@ def main():
 
 
     # 5. SIGNAL EGM START
-    rospy.loginfo("[EGM_handler] Signaling EGM start...")
+    # rospy.loginfo("[EGM_handler] Signaling EGM start...")
     result_code, result_message = call_trigger(EGM_START_SRV, SLEEP=1.0)
     rospy.loginfo(f"[EGM_handler] Start EGM joint result: {result_code}, message: {result_message}")
     

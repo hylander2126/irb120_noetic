@@ -1,167 +1,300 @@
 #!/usr/bin/env python3
 import numpy as np
 import rospy
-from std_msgs.msg import Float64MultiArray, Empty
+from std_msgs.msg import Float64MultiArray, Empty, Bool
 from geometry_msgs.msg import WrenchStamped, PoseStamped
 from threading import Lock
-from collections import deque
+from scipy.signal import butter, filtfilt
+from scipy.optimize import curve_fit
+from scipy.stats import linregress
+
 from apriltag_ros.msg import AprilTagDetectionArray
 from com_3d.com_estimation import tau_app_model, tau_model
-from scipy.optimize import curve_fit
+from com_3d.helper_fns import quat_normalize, quat_conj, quat_mul, quat_to_rotvec
 
-# --- Quat Math Helpers ---
-def quat_norm(q):
-    return q / (np.linalg.norm(q) + 1e-12)
-
-def quat_conj(q):
-    return np.array([-q[0], -q[1], -q[2], q[3]], float)
-
-def quat_mul(q1, q2):
-    x1, y1, z1, w1 = q1
-    x2, y2, z2, w2 = q2
-    return np.array([
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,
-        w1*w2 - x1*x2 - y1*y2 - z1*z2
-    ], float)
-
-def rotvec_from_quat(q):
-    q = quat_norm(q)
-    w = float(np.clip(q[3], -1.0, 1.0))
-    angle = 2.0 * np.arccos(w)
-    s = np.sqrt(max(1e-16, 1.0 - w*w))
-    return (q[:3] / s) * angle
-
-class AccumulatingEstimator:
+class BatchEstimator:
+    """
+    Accumulates data during a push, then performs a one-shot batch fit 
+    using the ForceWatcher status to mask valid tipping data.
+    """
     def __init__(self):
         self.lock = Lock()
-        self.is_active = False
+        self.fs_hz = float(rospy.get_param('~fs_hz', 500.0))
+        
+        # Buffer storage
+        self.times = []
+        self.forces = [] # [fx, fy, fz]
+        self.ee_pos = [] # [x, y, z]
+        self.quats = []  # [x, y, z, w]
+        self.contacts = [] # [bool] from ForceWatcher
+        
+        # State
+        self.is_collecting = False
         self.q_ref = None
-        
-        # Buffers
-        self._th, self._tau_s, self._fx, self._eez = [], [], [], []
-        self.f_median_buf = deque(maxlen=7) # Median "cheatcode" filter
-        self._sample_i = 0
-        self.decimate = int(rospy.get_param('~est_decimate', 5))
-        
-        # Caching params
-        self.o_obj, self.rc0 = None, None
-        self.e_hat = np.array([0.0, 1.0, 0.0])
-        self.lever_arm_pivot = 0.0
+        self.t_start = 0.0
 
-    def reset_and_start(self, initial_q):
+        # Filter params (4th order, 5Hz)
+        self.b, self.a = butter(4, 5.0, fs=self.fs_hz, btype='low')
+
+        self.update_params()
+
+    def update_params(self):
+        self.o_obj = np.array(rospy.get_param('/com_3d/o_obj', [0.66, 0, 0]), dtype=float)
+        self.rc0 = np.array(rospy.get_param('/com_3d/rc0_known', [-0.05, 0, 0]), dtype=float)
+        self.e_hat = np.array(rospy.get_param('~e_hat', [0.0, 1.0, 0.0]), dtype=float)
+        self.e_hat /= (np.linalg.norm(self.e_hat) + 1e-12)
+        # d = perp distance from rc0 to axis
+        self.d = float(np.linalg.norm(self.rc0 - np.dot(self.rc0, self.e_hat) * self.e_hat))
+
+    def start(self, q_initial):
         with self.lock:
-            # Fetch and convert to float numpy arrays to avoid TypeErrors
-            self.o_obj = np.array(rospy.get_param('/com_3d/o_obj', [0.66, 0, 0]), dtype=float)
-            self.rc0 = np.array(rospy.get_param('/com_3d/rc0_known', [-0.05, 0, 0]), dtype=float)
-            self.lever_arm_pivot = float(np.linalg.norm(self.rc0 - np.dot(self.rc0, self.e_hat) * self.e_hat))
+            self.update_params()
+            self.q_ref = quat_normalize(np.array(q_initial, float))
             
-            self.q_ref = quat_norm(initial_q)
-            self._th, self._tau_s, self._fx, self._eez = [], [], [], []
-            self.f_median_buf.clear()
-            self.is_active = True
-        rospy.loginfo("[streaming_estimator] BUFFER STARTED. Orientation relative to start pose.")
+            # Clear buffers
+            self.times = []
+            self.forces = []
+            self.ee_pos = []
+            self.quats = []
+            self.contacts = []
+            
+            self.t_start = rospy.get_time()
+            self.is_collecting = True
+        rospy.loginfo("[BatchEstimator] Collection STARTED.")
 
-    def stop(self, _):
+    def add_sample(self, f_xyz, ee_xyz, q_xyzw, contact_active):
+        if not self.is_collecting:
+            return
+            
         with self.lock:
-            self.is_active = False
-        rospy.loginfo("[streaming_estimator] BUFFER STOPPED.")
+            t_now = rospy.get_time() - self.t_start
+            self.times.append(t_now)
+            self.forces.append(f_xyz)
+            self.ee_pos.append(ee_xyz)
+            self.quats.append(q_xyzw)
+            self.contacts.append(contact_active)
 
-    def add_sample(self, f_xyz, ee_xyz, q_curr):
-        if not self.is_active: return
-
-        self._sample_i += 1
-        if (self._sample_i % self.decimate) != 0: return
-
-        # 1. Median filter FT sensor noise
-        self.f_median_buf.append(f_xyz)
-        if len(self.f_median_buf) < 7: return
-        f_smooth = np.median(self.f_median_buf, axis=0)
-
-        # 2. Relative Rotation
-        q_rel = quat_mul(quat_conj(self.q_ref), quat_norm(q_curr))
-        rv = rotvec_from_quat(q_rel)
-        theta = float(np.linalg.norm(rv))
-
-        # 3. Physics model Torque projection
-        rf = np.asarray(ee_xyz) - self.o_obj
-        tau_vec = np.cross(rf, -np.asarray(f_smooth)) 
-        tau_s = float(np.dot(tau_vec, self.e_hat))
-
+    def stop_and_fit(self):
+        """
+        Triggered on stop. Processes the full batch and returns estimate.
+        """
         with self.lock:
-            self._th.append(theta)
-            self._tau_s.append(tau_s)
-            self._fx.append(float(f_smooth[0]))
-            self._eez.append(float(ee_xyz[2]))
+            self.is_collecting = False
+            
+            if len(self.times) < 50:
+                rospy.logwarn("[BatchEstimator] Not enough samples collected.")
+                return None
 
-    def fit(self):
-        with self.lock:
-            if len(self._th) < 30: return None
-            th, tau_s = np.array(self._th), np.array(self._tau_s)
+            # Convert to numpy arrays
+            time = np.array(self.times)
+            f_raw = np.array(self.forces)
+            ee_raw = np.array(self.ee_pos)
+            q_raw = np.array(self.quats)
+            c_raw = np.array(self.contacts, dtype=bool)
+
+        rospy.loginfo(f"[BatchEstimator] Processing batch of {len(time)} samples...")
+
+        # -----------------------------------------------------------
+        # 1. PROCESS & FILTER 
+        # -----------------------------------------------------------
+        f_filt = filtfilt(self.b, self.a, f_raw, axis=0)
         
-        def fit_fn(theta, m, zc):
-            t = tau_model(theta, m, zc, rc0_known=self.rc0, e_hat=self.e_hat).reshape(-1, 3)
-            return t @ self.e_hat
+        # Calculate Angle (Theta)
+        rot_vecs = []
+        q_ref_conj = quat_conj(self.q_ref)
+        
+        for q in q_raw:
+            q_norm = quat_normalize(q)
+            q_rel = quat_mul(q_ref_conj, q_norm) 
+            rv = quat_to_rotvec(q_rel, normalize=False)
+            rot_vecs.append(rv)
+        
+        rot_vecs = np.array(rot_vecs)
+        rot_vecs_filt = filtfilt(self.b, self.a, rot_vecs, axis=0)
+        theta_exp = np.linalg.norm(rot_vecs_filt, axis=1)
+
+        # -----------------------------------------------------------
+        # 2. MASKING (Using ForceWatcher Status)
+        # -----------------------------------------------------------
+        # Use the ForceWatcher status as the primary mask.
+        # In the current ForceWatcher implementation, /com_3d/fw_contact_status
+        # is True during the PEAK+CONTACT phases (i.e., the window where the
+        # contact force is meaningful for torque fitting).
+        mask = c_raw
+
+        # Fallback: If FW never went high (e.g., comms issue or contact window
+        # was too short), derive a conservative mask from force magnitude.
+        if np.sum(mask) < 10:
+            fmag = np.linalg.norm(f_filt, axis=1)
+            # Baseline from the first 0.5s of data (or first 250 samples)
+            n0 = int(min(len(fmag), max(50, 0.5 * self.fs_hz)))
+            f0 = float(np.median(fmag[:n0])) if n0 > 0 else float(np.median(fmag))
+            # Require force meaningfully above baseline and some rotation
+            mask_f = (fmag > (f0 + 0.15)) & (theta_exp > 0.01)
+            if np.sum(mask_f) >= 25:
+                rospy.logwarn(
+                    "[BatchEstimator] ForceWatcher mask too small (%d). Falling back to force-based mask (%d).",
+                    int(np.sum(mask)), int(np.sum(mask_f))
+                )
+                mask = mask_f
+            else:
+                rospy.logwarn(
+                    "[BatchEstimator] ForceWatcher never reported a usable contact window (mask=%d) and fallback mask was also too small (%d). Fitting aborted.",
+                    int(np.sum(mask)), int(np.sum(mask_f))
+                )
+                return None
+            
+            
+        # Extract Trimmed Data
+        f_trim  = f_filt[mask]
+        th_trim = theta_exp[mask]
+        ee_trim = ee_raw[mask]
+        t_trim  = time[mask]
+        
+        rospy.loginfo(f"[BatchEstimator] Fitting on {len(t_trim)} samples identified by ForceWatcher.")
+
+        # -----------------------------------------------------------
+        # 3. CALCULATE TORQUE
+        # -----------------------------------------------------------
+        rf = ee_trim - self.o_obj
+        f_app = -f_trim  # Reaction -> Action
+        tau_app_trim = tau_app_model(f_app, rf) # Flattened array (N*3)
+        
+        # -----------------------------------------------------------
+        # 4. INITIAL GUESS (Linear Regression)
+        # -----------------------------------------------------------
+        try:
+            # Fit force X vs Theta
+            lin_slope, lin_b, _, _, _ = linregress(th_trim, f_trim[:, 0])
+            
+            theta_star_guess = -lin_b / lin_slope if abs(lin_slope) > 1e-4 else 0
+            if not (0.01 < theta_star_guess < 1.0):
+                theta_star_guess = 0.1 
+                
+            zc_calc = abs(self.d / np.tan(theta_star_guess))
+            m_calc = abs(abs(lin_slope) * np.mean(ee_trim[:,2]) / (9.81 * zc_calc))
+            
+            # Clamp Init
+            zc_calc = np.clip(zc_calc, 0.05, 0.8)
+            m_calc  = np.clip(m_calc, 0.1, 8.0)
+            
+        except Exception:
+            m_calc, zc_calc = 0.5, 0.2 
+
+        # -----------------------------------------------------------
+        # 5. NON-LINEAR CURVE FIT
+        # -----------------------------------------------------------
+        def fit_target(th, m, zc):
+            return tau_model(th, m, zc, rc0_known=self.rc0, e_hat=self.e_hat)
 
         try:
-            popt, _ = curve_fit(fit_fn, th, tau_s, p0=[0.5, 0.1], 
-                                bounds=([0.01, 0.01], [10.0, 1.0]), maxfev=400)
-            m_est, zc_est = float(popt[0]), float(popt[1])
-            ts_rad = float(np.arctan2(self.lever_arm_pivot, zc_est))
-            return m_est, zc_est, ts_rad, {"th": th, "tau": tau_s, "fit": fit_fn(th, *popt)}
-        except Exception: return None
+            popt, _ = curve_fit(
+                fit_target, 
+                th_trim, 
+                tau_app_trim, 
+                p0=[m_calc, zc_calc], 
+                bounds=([0.01, 0.01], [20.0, 1.0]),
+                maxfev=2000
+            )
+            m_est, zc_est = popt
+            theta_star_est = float(np.arctan2(self.d, zc_est))
+            
+            rospy.loginfo(f"[BatchEstimator] Result: m={m_est:.3f}, zc={zc_est:.3f}, th*={np.rad2deg(theta_star_est):.2f}")
+            
+            # -------------------------------------------------------
+            # 6. DEBUG DATA
+            # -------------------------------------------------------
+            step = max(1, len(t_trim) // 100)
+            
+            # Compute fit curve for plotting
+            tau_fit_flat = fit_target(th_trim, m_est, zc_est)
+            
+            # Project to scalar for easy plotting (Project onto e_hat)
+            tau_vec_exp = tau_app_trim.reshape(-1, 3)
+            tau_vec_fit = tau_fit_flat.reshape(-1, 3)
+            
+            tau_scalar_exp = np.dot(tau_vec_exp, self.e_hat)
+            tau_scalar_fit = np.dot(tau_vec_fit, self.e_hat)
+
+            dbg = {
+                "time": t_trim[::step],
+                "th": th_trim[::step],
+                "tau": tau_scalar_exp[::step],
+                "fit": tau_scalar_fit[::step],
+                "ths": theta_star_est,
+                "m": m_est,
+                "z": zc_est
+            }
+            return m_est, zc_est, theta_star_est, dbg
+
+        except Exception as e:
+            rospy.logwarn(f"[BatchEstimator] Curve fit failed: {e}")
+            return None
+
 
 class EstimatorNode:
     def __init__(self):
         rospy.init_node('streaming_estimator')
-        self.est = AccumulatingEstimator()
+        self.est = BatchEstimator()
         self.last_q, self.last_ee = None, None
+        self.contact_active = False # Track latest ForceWatcher status
 
-        # Logic: We can't start the estimator until we have a 'last_q' for reference
-        def on_log_start(_):
-            if self.last_q is None:
-                rospy.logwarn("[streaming_estimator] Cannot start: No AprilTag detection yet!")
-            else:
-                self.est.reset_and_start(self.last_q)
-
-        rospy.Subscriber('/com_3d/log_start', Empty, on_log_start)
-        rospy.Subscriber('/com_3d/log_stop',  Empty, self.est.stop)
+        # --- SUBSCRIBERS ---
+        rospy.Subscriber('/com_3d/log_start', Empty, self._on_start)
+        rospy.Subscriber('/com_3d/log_stop',  Empty, self._on_stop)
+        rospy.Subscriber('/netft_data_transformed', WrenchStamped, self._on_ft)
+        rospy.Subscriber('/tag_detections', AprilTagDetectionArray, self._on_tag)
+        rospy.Subscriber('/com_3d/tip_pose_fk', PoseStamped, self._on_ee)
         
-        rospy.Subscriber(rospy.get_param('~ft_stream_topic'), WrenchStamped, self._on_ft)
-        rospy.Subscriber(rospy.get_param('~tag_topic'), AprilTagDetectionArray, self._on_tag)
-        rospy.Subscriber(rospy.get_param('~tip_pose_topic'), PoseStamped, self._on_tip_pose)
+        # Subscribe to ForceWatcher status for masking
+        rospy.Subscriber('/com_3d/fw_contact_status', Bool, self._on_contact)
 
-        self.pub = rospy.Publisher('/com_3d/online_estimate', Float64MultiArray, queue_size=1)
-        self.pub_dbg = rospy.Publisher('/com_3d/online_fit_debug', Float64MultiArray, queue_size=1)
-        rospy.Timer(rospy.Duration(0.2), self._on_timer)
+        # --- PUBLISHERS ---
+        self.pub_res = rospy.Publisher('/com_3d/online_estimate', Float64MultiArray, queue_size=1, latch=True)
+        self.pub_dbg = rospy.Publisher('/com_3d/online_fit_debug', Float64MultiArray, queue_size=1, latch=True)
+
+    def _on_contact(self, msg):
+        self.contact_active = msg.data
+
+    def _on_start(self, _):
+        if self.last_q is not None:
+            self.est.start(self.last_q)
+        else:
+            rospy.logwarn("[EstimatorNode] Cannot start: No AprilTag orientation received yet.")
+
+    def _on_stop(self, _):
+        out = self.est.stop_and_fit()
+        if out:
+            m, z, ts, d = out
+            self.pub_res.publish(Float64MultiArray(data=[m, z, ts]))
+            
+            N = len(d["th"])
+            flat_data = [float(N)] + \
+                        list(d["time"]) + \
+                        list(d["th"]) + \
+                        list(d["tau"]) + \
+                        list(d["fit"]) + \
+                        [d["ths"], m, z]
+            self.pub_dbg.publish(Float64MultiArray(data=flat_data))
 
     def _on_tag(self, msg):
         if msg.detections:
             q = msg.detections[0].pose.pose.pose.orientation
             self.last_q = [q.x, q.y, q.z, q.w]
 
-    def _on_tip_pose(self, msg):
+    def _on_ee(self, msg):
         p = msg.pose.position
         self.last_ee = [p.x, p.y, p.z]
 
     def _on_ft(self, msg):
         if self.last_q and self.last_ee:
-            self.est.add_sample([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z], 
-                                 self.last_ee, self.last_q)
-        else:
-            # Diagnostic for why data isn't accumulating
-            rospy.logwarn_throttle(2.0, f"[streaming_estimator] Waiting for: {'Tag ' if not self.last_q else ''}{'EE ' if not self.last_ee else ''}")
-
-    def _on_timer(self, _):
-        res = self.est.fit()
-        if res:
-            m, z, ts, d = res
-            self.pub.publish(Float64MultiArray(data=[m, z, ts]))
-            N = len(d["th"])
-            # Packet: [N, theta_deg, tau_app, tau_fit, ts_deg, m, z]
-            self.pub_dbg.publish(Float64MultiArray(data=[N] + list(np.rad2deg(d["th"])) + 
-                                 list(d["tau"]) + list(d["fit"]) + [np.rad2deg(ts), m, z]))
+            # Pass contact status along with data
+            self.est.add_sample(
+                [msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z], 
+                self.last_ee, 
+                self.last_q,
+                self.contact_active
+            )
 
 if __name__ == '__main__':
     EstimatorNode()

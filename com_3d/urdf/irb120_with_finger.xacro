@@ -16,7 +16,7 @@
   <!-- Total offset from link_6 to finger tip will be ft_length + finger_length -->
 
   <!-- Calibrated so that when finger_tip touches the table, FK reports z=-0.01199 in base_link -->
-  <xacro:property name="table_to_base_z" value="0.01199"/>  <!-- meters -->
+  <xacro:property name="table_to_base_z" value="0.035"/>  <!-- was 0.01199 meters -->
 
   <!-- ====== FT sensor link mounted to link_6 ====== -->
   <link name="ft_link">

@@ -11,6 +11,7 @@
     <arg name="apply_transform" default="true"/>
     <arg name="apply_bias" default="true"/>
     <arg name="live_rqt" default="true"/>
+    <arg name="hack_transform" default="false"/>
 
 <!-- Run netft_utils using correct ip address for sensor -->
     <node pkg="netft_utils" type="netft_node" name="netft_node" output="screen"
@@ -22,6 +23,7 @@
         <param name="output_topic" value="/netft_data_transformed"/>
         <param name="apply_bias" value="$(arg apply_bias)"/>
         <param name="apply_transform" value="$(arg apply_transform)"/>
+        <param name="hack_transform" value="$(arg hack_transform)"/>
     </node>
 
 <!-- Regardless, use the netft_data_transformed topic for plotting -->

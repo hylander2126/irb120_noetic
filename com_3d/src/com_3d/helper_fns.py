@@ -118,16 +118,17 @@ def quat_to_axis_angle(Q):
 
 
 def quat_normalize(q):
+    # Normalize quaternion to unit length
     q = np.asarray(q, dtype=float)
     n = np.linalg.norm(q)
-    if not np.isfinite(n) or n < 1e-12:
-        return np.array([np.nan, np.nan, np.nan, np.nan])
-    return q / n
+    return q/ (n + 1e-12)
 
-def quat_conj(q):  # [x,y,z,w]
+def quat_conj(q):
+    # Conjugate of quat (negate xyz keep w) ORDERING xyzw
     return np.array([-q[0], -q[1], -q[2], q[3]], dtype=float)
 
-def quat_mul(q1, q2):  # Hamilton product, [x,y,z,w]
+def quat_mul(q1, q2):
+    # Quaternion multiplication (Hamilton) ORDERING xyzw
     x1,y1,z1,w1 = q1
     x2,y2,z2,w2 = q2
     return np.array([
@@ -137,22 +138,19 @@ def quat_mul(q1, q2):  # Hamilton product, [x,y,z,w]
         w1*w2 - x1*x2 - y1*y2 - z1*z2
     ], dtype=float)
 
-def quat_to_rotvec(q):  # returns rotation vector (axis * angle), radians
+def quat_to_rotvec(q, normalize=True):  # returns rotation vector (axis * angle), radians
     # assumes q is unit and represents rotation from reference to current
-    q = quat_normalize(q)
+    if normalize:
+        q = quat_normalize(q)
+
     if np.any(~np.isfinite(q)):
         return np.array([np.nan, np.nan, np.nan])
 
-    x,y,z,w = q
-    w = np.clip(w, -1.0, 1.0)
+    w = np.clip(q[3], -1.0, 1.0)
     angle = 2.0 * np.arccos(w)
-    s = np.sqrt(max(0.0, 1.0 - w*w))  # = sin(angle/2)
+    s = np.sqrt(max(1e-16, 1.0 - w*w))
 
-    if s < 1e-8 or angle < 1e-8:
-        return np.array([0.0, 0.0, 0.0])
-
-    axis = np.array([x, y, z]) / s
-    return axis * angle
+    return (np.array(q[:3]) / s) * angle
 
 
 def screw_to_se3(S):
