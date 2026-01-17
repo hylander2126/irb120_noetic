@@ -86,23 +86,39 @@ OBJECT_MOTIONS = {
 }
 
 
-def _wait_and_report_online_estimate(timeout_s: float = 3.0):
-    """Wait for the latest online estimate and print it nicely."""
-    try:
-        msg = rospy.wait_for_message("/com_3d/online_estimate", Float64MultiArray, timeout=timeout_s)
-    except rospy.ROSException:
-        rospy.logwarn("[push] No /com_3d/online_estimate received (is streaming_estimator running?).")
-        return
+class EstimateListener:
+    """
+    Helper to listen for online estimates reliably.
+    Prevents race conditions by maintaining a persistent subscriber.
+    """
+    def __init__(self):
+        self._data = None
+        self._received = False
+        # Persistent subscriber ensures we don't miss unlatched messages
+        self._sub = rospy.Subscriber("/com_3d/online_estimate", Float64MultiArray, self._cb)
 
-    m_est, zc_est, theta_star = msg.data[:3]
-    rospy.loginfo(
-        "[push] FINAL ONLINE ESTIMATE: m=%.4f kg, zc=%.4f m, theta*=%.2f deg",
-        m_est, zc_est, np.rad2deg(theta_star)
-    )
-    # also stash for other nodes / debugging
-    rospy.set_param("/com_3d/last_online_estimate", [float(m_est), float(zc_est), float(theta_star)])
+    def _cb(self, msg):
+        self._data = msg.data
+        self._received = True
 
-    return [m_est, zc_est, theta_star]
+    def clear(self):
+        """Call this BEFORE triggering the estimator."""
+        self._received = False
+        self._data = None
+
+    def wait_for_new_estimate(self, timeout=3.0):
+        """Call this AFTER triggering the estimator."""
+        start = rospy.Time.now()
+        rate = rospy.Rate(20) # Check 20 times a second
+        
+        while not rospy.is_shutdown():
+            if self._received:
+                return self._data
+            
+            if (rospy.Time.now() - start).to_sec() > timeout:
+                return None
+            
+            rate.sleep()
 
 
 def arm_logs():
@@ -135,17 +151,22 @@ def choose_second_push(zc_est, margin, obj_ht, n_safety):
 def main():
     rospy.init_node("push")
 
+    est_listener = EstimateListener()
+
     DURATION    = 12.0 # secs 8.0 # seconds
     PUSH_SPEED  = 0.01 # m/s
     JOINT_TOL   = 2e-3 # rad
 
-    n_SAFETY = rospy.get_param("~n_safety", 0.9) # (1= full safety (stop upon contact), 0= full topple)
-    rospy.loginfo(f"[push] Using n_safety={n_SAFETY:.2f}")
-
+    n_SAFETY = rospy.get_param("~n_safety", -1) # (1= full safety (stop upon contact), 0= full topple)
     object_name = rospy.get_param("~object", None)
     if object_name is None or object_name not in OBJECT_MOTIONS:
         rospy.logerr(f"[push] Object '{object_name}' not recognized. Set _object:= to one of: {list(OBJECT_MOTIONS.keys())}")
         return
+    if not (0.0 <= n_SAFETY <= 1.0):
+        rospy.logerr(f"[push] n_safety must be in [0,1], got n_safety={n_SAFETY}")
+        return
+    
+    rospy.loginfo(f"[push] Using n_safety={n_SAFETY:.2f}")
     
 
     # Publish some params globally for estimation and logging
@@ -184,6 +205,9 @@ def main():
     # 2) ********** Execute push motion ***********
     rospy.sleep(1.5) # NICE LONG SLEEP TO LET MOTIONS FINISH AND STABILIZE
     fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
+    fw.is_active = True
+    est_listener.clear()  # Clear any old estimates
+
     arm_logs()  # Start logging for push motion
 
     success_push = ctrl.cartesian_velocity(
@@ -193,14 +217,19 @@ def main():
         force_watcher=fw,
         lock_orient=True,
     )
-    disarm_logs()  # Stop logging for push motion
+    disarm_logs()  # Stop logging for push motion (triggers estimator to process)
+    fw.is_active = False
     if not check_manip_success(success_push, "Push"):
         return
     
     # Pull the most recent streaming estimate (if available)
-    try:
-        m_est, zc_est, theta_star = _wait_and_report_online_estimate(timeout_s=3.0)
-    except:
+
+    data = est_listener.wait_for_new_estimate(timeout=3.0)
+    if data:
+        m_est, zc_est, theta_star = data
+        rospy.loginfo(f"[push] Online estimate after first push: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
+    else:
+        rospy.logwarn("[push] No online estimate available after first push.")
         m_est, zc_est, theta_star = None, None, None
 
     # *********************************************
@@ -223,7 +252,7 @@ def main():
 
     # 4) If no estimate, skip second push, return to original pose
     if m_est is None or zc_est is None:
-        rospy.logwarn("[push] No online estimate available, skipping second push decision.")
+        rospy.logwarn("[push] No online estimate available, returning to initial pose.")
 
         success_return = ctrl.move_to_pose(pos, quat, timeout=8.0, tol=JOINT_TOL)
         check_manip_success(success_return, "Return")
@@ -238,6 +267,10 @@ def main():
 
     rospy.loginfo(f"[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m")
 
+    fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
+
+    # -------------------------------------------------------------
+    # Move to next push height (with one retry)
     success_return = ctrl.move_to_pose(
         xyz=[pos[0], pos[1], next_push_ht],
         quat=quat,
@@ -245,9 +278,20 @@ def main():
         tol=JOINT_TOL
     )
     if not check_manip_success(success_return, "Active Push Return"):
-        return
-    
-    success_acctive = ctrl.cartesian_velocity(
+        rospy.loginfo("[push] Retrying Active Push Return...")
+        success_return2 = ctrl.move_to_pose(
+                            xyz=[pos[0], pos[1], next_push_ht],
+                            quat=quat,
+                            timeout=8.0,
+                            tol=JOINT_TOL
+                        )
+        if not check_manip_success(success_return2, "Active Push Return Retry"):
+            return
+    # -------------------------------------------------------------
+    fw.is_active = True
+    est_listener.clear()  # Clear any old estimates
+
+    success_active = ctrl.cartesian_velocity(
         v=[PUSH_SPEED, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
         duration=DURATION, # 8
@@ -255,14 +299,33 @@ def main():
         lock_orient=True,
     )
     disarm_logs()  # Stop logging for second push motion
-    if not check_manip_success(success_acctive, "Active Second Push"):
+    fw.is_active = False
+    if not check_manip_success(success_active, "Active Second Push"):
         return
 
      # Pull the most recent streaming estimate (if available)
-    try:
-        m_est, zc_est, theta_star = _wait_and_report_online_estimate(timeout_s=3.0)
-    except:
-        m_est, zc_est, theta_star = None, None, None
+    data = est_listener.wait_for_new_estimate(timeout=3.0)
+    if data:
+        m_est, zc_est, theta_star = data
+        rospy.loginfo(f"[push] Online estimate after 2nd push: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
+    else:
+        rospy.logwarn("[push] No online estimate available after second push.")
+
+
+    # 6) Retract along same linear path
+    success_retract = ctrl.cartesian_velocity(
+        v=[-PUSH_SPEED, 0, 0], # XYZ
+        w=[0, 0, 0],   # RPY
+        duration=ctrl.last_cartesian_duration, # returns ~same distance
+        lock_orient=True,
+    )
+    if not check_manip_success(success_retract, "Retraction"):
+        return
+    
+    # 7) Return to original pose
+    success_return = ctrl.move_to_pose(pos, quat, timeout=8.0, tol=JOINT_TOL)
+    check_manip_success(success_return, "Return")
+    return
 
 
 

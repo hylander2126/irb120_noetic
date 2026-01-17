@@ -85,9 +85,11 @@ class VelocityController:
         self.last_cartesian_duration    = None
 
         # Joint goal gains
-        self.kp_joints = np.array([4, 4, 4, 4, 6, 4], dtype=float)#4.0  # [rad/s per rad error]
-        self.ki_joints = np.array([0.4, 0.4, 0.4, 0.4, 0.8, 0.4], dtype=float)  # [rad/s^2 per rad error]
-        self.kd_joints = np.array([0.1, 0.1, 0.1, 0.1, 0.2, 0.1], dtype=float) # [rad/s per rad error rate]
+        self.kp_joints = 4.0  # [rad/s per rad error]
+        self.ki_joints = 0.4  # [rad/s^2 per rad error]
+        self.kd_joints = 0.01 # [rad/s per rad error rate]
+        self.err_prev = np.zeros(6, dtype=float)
+        self.err_I    = np.zeros(6, dtype=float)
         self.I_max    = np.full(6, 0.5, dtype=float)  # rad*sec
 
         # Cartesian gains
@@ -248,20 +250,14 @@ class VelocityController:
             float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
         )
 
-    def _apply_q_qdot_limits(self, q_curr, q_dot_cmd):
+    def _apply_joint_limit_avoidance(self, q_curr, q_dot_cmd):
         """
-        Very simple joint position- and velocity-limit avoidance:
+        Very simple joint-limit avoidance:
         - Predict next position
         - If we are moving further out of the safe region, zero that joint's velocity.
         """
-        q_dot_cmd= np.asarray(q_dot_cmd, dtype=float).reshape(self.nj)
-
-        # 1) Clamp to velocity limits
-        lim = np.full(self.nj, self.max_joint_vel, dtype=float)
-        q_dot_cmd = np.clip(q_dot_cmd, -lim, lim)
-
-        # 2) Predict next position and check limits
         q_next = q_curr + q_dot_cmd * self.dt
+
         lo_safe = self.joint_lower + self.joint_safety_margin
         hi_safe = self.joint_upper - self.joint_safety_margin
 
@@ -272,9 +268,6 @@ class VelocityController:
             if q_next[i] > hi_safe[i] and q_dot_cmd[i] > 0.0:
                 q_dot_cmd[i] = 0.0
                 rospy.logwarn_throttle(1.0, f"[VC] {self.joint_names[i]} UPPER limit; zeroing vel.")
-        
-        # 3) Final velocity clamp (in case zeroing pushed us over)
-        q_dot_cmd = np.clip(q_dot_cmd, -lim, lim)
         return q_dot_cmd
 
     def _floor_constraint_isok(self, q_np):
@@ -292,7 +285,7 @@ class VelocityController:
 
     def move_to_joint_positions(self, q_target, timeout=5.0, tol=4e-3, bypass_floor=False):
         """
-        Drive joints to q_target using a simple velocity PID-controller.
+        Drive joints to q_target using a simple velocity P-controller.
 
         q_target: list/np.array of target joint angles (rad),
                   same order as self.joint_names.
@@ -305,11 +298,13 @@ class VelocityController:
         # ---------- SAFETY: check floor_z constraint ----------
         if not self._floor_constraint_isok(q_target):
             raise RuntimeError(f"[VC] Refusing move_to_joint_positions to target {q_target}")
-        # -----------------------------------------------------
 
-        kp_joints = self.kp_joints
-        kd_joints = self.kd_joints
-        ki_joints = self.ki_joints
+        kp = self.kp_joints
+        kp_joints = np.array([kp, kp, kp, kp, kp*1.5, kp])
+        kd = self.kd_joints
+        kd_joints = np.array([kd, kd, kd, kd, kd*2.0, kd])
+        ki = self.ki_joints
+        ki_joints = np.array([ki, ki, ki, ki, ki*1.5, ki])
 
         rospy.loginfo(f"[VC] move_to_joint_positions:\n{q_target}")
 
@@ -317,13 +312,6 @@ class VelocityController:
 
         start_time = rospy.Time.now()
         stop_reason = None
-
-        # err_prev = np.zeros(6, dtype=float)
-        err_I    = np.zeros(6, dtype=float)
-        q_prev   = None #np.zeros(self.nj, dtype=float)
-        i_zone   = 0.15 # rad
-        within_since = None
-        dwell_time = 0.2 # seconds to remain within tol before stopping
 
         ## =========================== MOTION LOOP ============================
         while not rospy.is_shutdown():
@@ -345,46 +333,30 @@ class VelocityController:
             err = q_target - q_curr
             # Check for convergence
             if np.linalg.norm(err) < tol:
-                if within_since is None:
-                    within_since = rospy.Time.now()
-                elif (rospy.Time.now() - within_since).to_sec() >= dwell_time:
-                    rospy.loginfo("[VC] Joint target reached. Joint errors:\n"
-                                  f"{q_target - q_curr}")
-                    stop_reason = 1 # 'good' stop
-                    break
-            else:
-                within_since = None
+                rospy.loginfo("[VC] Joint target reached. Joint errors:\n"
+                              f"{q_target - q_curr}")
+                stop_reason = 1 # 'good' stop
+                break
 
-
-            # Integral anti-windup
-            # err_I += err * self.dt
-            err_I += np.where(np.abs(err) < i_zone, err * self.dt, 0.0) # Only integrate inside i_zone (close to target)
-            err_I = np.clip(err_I, -self.I_max, self.I_max)
-            
+            # Integral and anti-windup
+            self.err_I += err * self.dt
+            self.err_I = np.clip(self.err_I, -self.I_max, self.I_max)
             # Derivative
-            # err_D = (err - err_prev) / self.dt
-            
-            if q_prev is None:
-                q_dot_meas = np.zeros(self.nj, dtype=float) # Skip derivative on first iteration (avoid spike)
-            else:
-                q_dot_meas = (q_curr - q_prev) / self.dt
-            
-            q_prev = q_curr.copy()
+            err_D = (err - self.err_prev) / self.dt
 
-            # vel_raw = (kp_joints * err) + (ki_joints * err_I) + (kd_joints * err_D)
-            vel_raw = (kp_joints * err) - (kd_joints * q_dot_meas) + (ki_joints * err_I)
-            # err_prev = err.copy()
-
+            vel_raw = kp_joints * err + ki_joints * self.err_I + kd_joints * err_D
+            self.err_prev = err.copy()
             # -----------------------
 
             # Enforce max joint velocity scaling
-            # max_abs = float(np.max(np.abs(vel_raw)))
-            # if max_abs > self.max_joint_vel:
-            #     scale = self.max_joint_vel / max_abs
-            #     vel_raw *= scale
-            
+            max_abs = float(np.max(np.abs(vel_raw)))
+            if max_abs > self.max_joint_vel:
+                scale = self.max_joint_vel / max_abs
+                vel_raw *= scale
+
             q_dot_cmd = vel_raw
-            q_dot_cmd = self._apply_q_qdot_limits(q_curr, q_dot_cmd)
+            q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
+            q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
             # -------------- SAFETY: check floor_z constraint ----------
             if not bypass_floor and not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt):
                 stop_reason = "floor_z constraint violated."
@@ -433,21 +405,21 @@ class VelocityController:
                 early_stop_reason = None # Normal completion
                 break
 
-            if force_watcher:
-                # Allow initial settling, then record baseline. Until then, force it back to MONITOR
-                if elapsed < 0.1:
-                        force_watcher.reset(force_state="MONITOR")
-                else:
-                    rospy.loginfo_once("[VC] Force watcher is active and Monitoring!!")
-                    if force_watcher.trigger:
-                        early_stop_reason = 1 # 'good' stop
-                        break
+            if force_watcher and force_watcher.trigger:
+                early_stop_reason = 1 # 'good' stop
+                break
 
             with self._state_lock:
                 q_curr = self._q.copy()
             if q_curr is None:
                 self.rate.sleep()
                 continue
+
+            # Allow initial settling, then record baseline. Until then, force it back to MONITOR
+            if force_watcher and elapsed < 0.3:
+                    force_watcher.reset(force_state="MONITOR")
+            else:
+                rospy.loginfo_once("[VC] Force watcher is active and Monitoring!!")
 
             # ----------- Cartesian corrections (orient and z-lock) -----------
             xyz_curr, M_curr, _ = self._get_tip_pose()
@@ -473,7 +445,8 @@ class VelocityController:
 
             # Compute joint velocities via KDL velocity IK
             q_dot_cmd = self._ik_velocity(q_curr, np.concatenate([v_cmd, w_cmd]))
-            q_dot_cmd = self._apply_q_qdot_limits(q_curr, q_dot_cmd)
+            q_dot_cmd = self._apply_joint_limit_avoidance(q_curr, q_dot_cmd)
+            q_dot_cmd = np.clip(q_dot_cmd, -self.max_joint_vel, self.max_joint_vel)
 
             # -------------- SAFETY: check floor_z constraint ----------
             if not self._floor_constraint_isok(q_curr + q_dot_cmd * self.dt):

@@ -245,7 +245,7 @@ class LiveFitPlotter:
 
         # Save (paper-ready)
         if do_save:
-            pdf_path = os.path.join(self.out_dir, stem + "_fit.pdf")
+            # pdf_path = os.path.join(self.out_dir, stem + "_fit.pdf")
             png_path = os.path.join(self.out_dir, stem + "_fit.png")
 
             try:
@@ -253,9 +253,9 @@ class LiveFitPlotter:
                 self.fig.canvas.draw_idle()
                 self.fig.canvas.flush_events()
 
-                self.fig.savefig(pdf_path, bbox_inches="tight")
+                # self.fig.savefig(pdf_path, bbox_inches="tight")
                 self.fig.savefig(png_path, dpi=300, bbox_inches="tight")
-                rospy.loginfo("[Plotter] Saved: %s and %s", pdf_path, png_path)
+                rospy.loginfo("[Plotter] Saved: %s", png_path)
             except Exception as e:
                 rospy.logwarn("[Plotter] Save failed: %s", str(e))
         # We don't draw here; the main loop handles drawing to keep GUI responsive

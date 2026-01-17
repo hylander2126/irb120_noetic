@@ -26,6 +26,8 @@ class ForceWatcher:
         self.debug = debug
         self.min_force_close_zero = 0.14 # (was 0.03) N below this is basically zero, robot jerks at first this avoids an early stop
 
+        self.is_active = False
+
         # Baseline / noise estimation
         self.baseline_buf = [0.0] * baseline_window # prepare empty buffer
         self.baseline_ready = False
@@ -63,13 +65,17 @@ class ForceWatcher:
 
         # Looks like lshape (lightest) has peaks F: 0.117 -> 0.128 -> 0.248 -> 0.331
         
-        rospy.loginfo(f"[ForceWatcher] Armed with k_safe={self.n_safety}.")
+        rospy.loginfo(f"[ForceWatcher] Armed with n_safety={self.n_safety}.")
 
 
     def ft_cb(self, msg):
         # Bail out if shutdown
         if rospy.is_shutdown():
             return
+        # Bail out if not active
+        if not self.is_active:
+            return
+        
         # Publish contact and trigger events continuously.
         #
         # IMPORTANT:
@@ -128,7 +134,7 @@ class ForceWatcher:
             cond2 = True #f_med > (self.noise_floor + self.min_force_close_zero) # TEMP testing to avoid tiny forces (robot jerk) detecting as contact
             if cond1 and cond2:
                 self.contact_count += 1
-                self.debug_msg(f"Contact magnitude met: f_med={f_med:.3f} N, (contact_delta={self.contact_delta:.3f})") if cond1 else None
+                self.debug_msg(f"Contact magnitude met: {f_med:.3f} N, (contact_delta={self.contact_delta:.3f})") if cond1 else None
                 self.debug_msg(f"Contact count: {self.contact_count}/{self.contact_samples}")
                 if self.contact_count >= self.contact_samples:
                     self.STATE = "PEAK"
@@ -143,31 +149,31 @@ class ForceWatcher:
             self.peak_buf.append(f_med)
             if self.peak_buf.count(0.0) == 0:
                 self.peak = float(np.max(self.peak_buf))
-                self.debug_msg(f"Peak force recorded: {self.peak:.3f} N")
+                self.debug_msg(f"Peak force recorded: {self.peak:.3f} N", 0)
                 self.STATE = "CONTACT"
 
 
         # ------------ 3) CONTACT / PEAK TRACING ------------
         if self.STATE == "CONTACT":
+            
+            # UPDATE: Continue Tracing Peak if F rises
+            if f_med > self.peak:
+                self.peak = f_med
+                self.debug_msg(f"Tracking new peak: {self.peak:.3f} N", 0)
 
             f_safe = self.n_safety * self.peak
             thresh = np.max([f_safe, self.noise_floor])
-            if thresh != f_safe:
-                self.debug_msg(f"Adjusted f_safe to noise floor: {thresh:.3f} N (original f_safe: {f_safe:.3f} N, noise floor: {self.noise_floor:.3f} N)", 0)
 
-            self.debug_msg(f"Tracking current:{f_med:.3f}, peak: {self.peak:.3f} for f_safe: {thresh:.3f}", 0.1)
+            self.debug_msg(f"Current: {f_med:.3f}N  Peak: {self.peak:.3f} N  f_safe: {f_safe:.3f} N", 0.1)
             
             if self.peak > 0.0:
                 if f_med < thresh:
                     self.below_count += 1
-                    self.debug_msg(f"Falling detected: f_med={f_med:.3f} N < thresh={thresh:.3f} N "
-                                f"({self.below_count}/{self.fall_samples})", 1.0)
                     if self.below_count >= self.fall_samples:
                         self.STATE = "TRIGGERED"
                         self.pub_trigger.publish(1)
                         self.trigger = True
                         self.debug_msg(f"Stop triggered(peak: {self.peak:.3f} N, threshold: {thresh:.3f} N, current: {f_med:.3f} N).")
-                        # self.sub_ft.unregister()
                 else:
                     self.below_count = 0
         
@@ -192,8 +198,15 @@ class ForceWatcher:
         self.contact_count = 0
         self.below_count = 0
         self.peak = 0.0
+
+        # baseline reset
         self.baseline_ready = False
         self.baseline_buf = [0.0] * len(self.baseline_buf)
+
+        # clear history
+        self.median_buf = [0.0] * len(self.median_buf)
+        self.peak_buf = [0.0] * len(self.peak_buf)
+        self.prev_med = None
         
         # Publish the cleared state immediately to update latched topics
         self.pub_contact.publish(False)

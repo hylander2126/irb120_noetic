@@ -80,7 +80,6 @@ class BatchEstimator:
         """
         with self.lock:
             self.is_collecting = False
-            
             if len(self.times) < 50:
                 rospy.logwarn("[BatchEstimator] Not enough samples collected.")
                 return None
@@ -116,14 +115,9 @@ class BatchEstimator:
         # -----------------------------------------------------------
         # 2. MASKING (Using ForceWatcher Status)
         # -----------------------------------------------------------
-        # Use the ForceWatcher status as the primary mask.
-        # In the current ForceWatcher implementation, /com_3d/fw_contact_status
-        # is True during the PEAK+CONTACT phases (i.e., the window where the
-        # contact force is meaningful for torque fitting).
         mask = c_raw
 
-        # Fallback: If FW never went high (e.g., comms issue or contact window
-        # was too short), derive a conservative mask from force magnitude.
+        # Fallback: If FW never triggers (comms issue or contact window too short), us conservative mask from F mag.
         if np.sum(mask) < 10:
             fmag = np.linalg.norm(f_filt, axis=1)
             # Baseline from the first 0.5s of data (or first 250 samples)
@@ -178,7 +172,7 @@ class BatchEstimator:
             zc_calc = np.clip(zc_calc, 0.05, 0.8)
             m_calc  = np.clip(m_calc, 0.1, 8.0)
             
-        except Exception:
+        except:
             m_calc, zc_calc = 0.5, 0.2 
 
         # -----------------------------------------------------------
@@ -250,7 +244,7 @@ class EstimatorNode:
         rospy.Subscriber('/com_3d/fw_contact_status', Bool, self._on_contact)
 
         # --- PUBLISHERS ---
-        self.pub_res = rospy.Publisher('/com_3d/online_estimate', Float64MultiArray, queue_size=1, latch=True)
+        self.pub_res = rospy.Publisher('/com_3d/online_estimate', Float64MultiArray, queue_size=1, latch=False)
         self.pub_dbg = rospy.Publisher('/com_3d/online_fit_debug', Float64MultiArray, queue_size=1, latch=True)
 
     def _on_contact(self, msg):
