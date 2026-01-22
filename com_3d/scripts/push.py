@@ -2,7 +2,7 @@
 import rospy
 from com_3d.vel_controller import VelocityController
 from com_3d.force_watcher import ForceWatcher
-from std_msgs.msg import Float64MultiArray, Empty
+from std_msgs.msg import Float64MultiArray, Empty, Bool
 import numpy as np
 
 # RETRIEVED BY JOGGING ROBOT TO *EXACTLY* ALL ZERO JOINTS ( THESE ARE ALL FROM ROBOT TRANSFORM ON TABLET)
@@ -97,6 +97,13 @@ class EstimateListener:
         # Persistent subscriber ensures we don't miss unlatched messages
         self._sub = rospy.Subscriber("/com_3d/online_estimate", Float64MultiArray, self._cb)
 
+        self._arm_log_pub = rospy.Publisher('/com_3d/log_start', Empty, queue_size=1, latch=True)
+        self._disarm_log_pub = rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True)
+        self._arm_est_pub = rospy.Publisher('/com_3d/est_start', Empty, queue_size=1, latch=True)
+        self._disarm_est_pub = rospy.Publisher('/com_3d/est_stop',  Empty, queue_size=1, latch=True)
+
+        self._retract_pub = rospy.Publisher('/com_3d/retract_phase', Bool, queue_size=1, latch=False)
+
     def _cb(self, msg):
         self._data = msg.data
         self._received = True
@@ -111,21 +118,33 @@ class EstimateListener:
         start = rospy.Time.now()
         rate = rospy.Rate(20) # Check 20 times a second
         
+        out = None
+
         while not rospy.is_shutdown():
             if self._received:
-                return self._data
+                out = self._data
+                m_est, zc_est, theta_star = out
+                rospy.loginfo(f"[push] Received online estimate data: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
+                return out
             
             if (rospy.Time.now() - start).to_sec() > timeout:
-                return None
+                rospy.logwarn("[push] No online estimate available / received.")
+                return [None, None, None]
             
             rate.sleep()
 
+    def arm_logs(self):
+        self._arm_log_pub.publish(Empty())
 
-def arm_logs():
-    rospy.Publisher('/com_3d/log_start', Empty, queue_size=1, latch=True).publish(Empty())
+    def arm_estimate(self):
+        self._arm_est_pub.publish(Empty())
 
-def disarm_logs():
-    rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True).publish(Empty())
+    def disarm_logs(self):
+        self._disarm_log_pub.publish(Empty())
+
+    def disarm_estimate(self):
+        self._disarm_est_pub.publish(Empty())
+    
 
 def check_manip_success(success: bool, action_desc: str) -> bool:
     """Check if a manipulation action succeeded, log and return."""
@@ -135,36 +154,112 @@ def check_manip_success(success: bool, action_desc: str) -> bool:
     rospy.loginfo(f"[push] {action_desc} succeeded.\n")
     return True
 
-def choose_second_push(zc_est, margin, obj_ht, n_safety):
+
+def choose_second_push(zc_est, margin, obj_ht):
     """
     Decide whether to do a second push based on current estimate and safety factor.
     """
     assert 0.0 <= margin <= 1.0, "Margin must be between 0 and 1."
     next_push_ht = zc_est + (zc_est * margin)
 
-    next_push_ht = np.clip(next_push_ht, 0.2, obj_ht) # min 20cm, max object height
+    next_push_ht = np.clip(next_push_ht, 0.065, obj_ht) # min just above floor z safety (0.06) constraint, max object height
 
     return next_push_ht
     
+
+def prepush_procedure(controller, position, quaternion, joint_tol, retries=0):
+    """
+    Procedure to prepare the robot for pushing.
+    """
+    for attempt in range(retries + 1):
+        rospy.loginfo(f"[push] Moving to pre-push pose at {position} (Attempt {attempt + 1}/{retries + 1})...")
+        
+        success_prep = controller.move_to_pose(position, quaternion, timeout=8.0, tol=joint_tol)
+        if not check_manip_success(success_prep, f"Pre-push Attempt {attempt + 1}"):
+            # If last attempt, raise error and shutdown this node
+            if attempt == retries:
+                rospy.logerr(f"[push] Failed to reach pre-push pose after {attempt+1}/{retries + 1} attempts. Aborting.")
+                rospy.signal_shutdown("Pre-push pose unreachable.")
+                return False
+        else:
+            break
+    return True
+
+
+def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_tol, enable_logging, retries):
+    """
+    Execute complete push sequence: prep -> push -> retract.
+    
+    Args:
+        enable_logging: If True, start/stop logging around this push sequence
+    """
+    success_prepush = prepush_procedure(ctrl, pos, quat, joint_tol, retries)
+    if not success_prepush:
+        est.disarm_logs()  # Ensure logging is stopped if max retries exceeded
+        return None
+    
+    fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
+    fw.is_active = True
+    est.clear()  # Clear any old estimates
+    rospy.sleep(1.0) # NICE LONG SLEEP TO LET MOTIONS FINISH AND STABILIZE
+    est.arm_estimate()  # Start estimator
+
+    if enable_logging:
+        est.arm_logs()  # Start logging for push motion
+
+    success_push = ctrl.cartesian_velocity(
+        v=[push_speed, 0, 0], # XYZ
+        w=[0, 0, 0],   # RPY
+        duration=duration,
+        force_watcher=fw,
+        lock_orient=True,
+    )
+    # disarm_estimate()  # Stop estimator
+    # fw.is_active = False
+    if not check_manip_success(success_push, "Push"):
+        est.disarm_logs()  # Ensure logging is stopped
+        return None
+    
+    # Pull the most recent streaming estimate (if available)
+    # data = est.wait_for_new_estimate(timeout=3.0) # Returns None, None, None if no estimate available
+    
+    # est.publish_retract(True)  # Notify estimator of retract phase
+    # rospy.sleep(0.1)  # Small delay to ensure retract phase is registered
+
+    success_retract = ctrl.cartesian_velocity(
+        v=[-push_speed, 0, 0], # XYZ
+        w=[0, 0, 0],   # RPY
+        duration=ctrl.last_cartesian_duration + 0.2, # returns ~same distance + 0.2 buffer to be safe
+        force_watcher=None, # No force watcher on retract
+        lock_orient=True,
+        pub_retract=True,
+    )
+    # est.publish_retract(False)  # Notify estimator retract phase is over
+    fw.is_active = False
+    est.disarm_estimate()  # Stop estimator
+    data = est.wait_for_new_estimate(timeout=3.0) # Returns None, None, None if no estimate available
+    if not check_manip_success(success_retract, "Retraction"):
+        est.disarm_logs()  # Ensure logging is stopped
+        return None
+
+    return data  # m_est, zc_est, theta_star
 
 
 def main():
     rospy.init_node("push")
 
-    est_listener = EstimateListener()
+    est = EstimateListener()
 
-    DURATION    = 12.0 # secs 8.0 # seconds
-    PUSH_SPEED  = 0.01 # m/s
+    DURATION    = 12.0#22.0 # 12.0 secs # I halved the push speed, so have to double duration
+    PUSH_SPEED  = 0.01#0.005 # 0.01 m/s
     JOINT_TOL   = 2e-3 # rad
 
     n_SAFETY = rospy.get_param("~n_safety", -1) # (1= full safety (stop upon contact), 0= full topple)
     object_name = rospy.get_param("~object", None)
     if object_name is None or object_name not in OBJECT_MOTIONS:
-        rospy.logerr(f"[push] Object '{object_name}' not recognized. Set _object:= to one of: {list(OBJECT_MOTIONS.keys())}")
-        return
+        rospy.signal_shutdown(f"Invalid object name. Set _object:= to one of {list(OBJECT_MOTIONS.keys())}")
     if not (0.0 <= n_SAFETY <= 1.0):
-        rospy.logerr(f"[push] n_safety must be in [0,1], got n_safety={n_SAFETY}")
-        return
+        rospy.signal_shutdown(f"[push] n_safety must be in [0,1], got n_safety={n_SAFETY}")
     
     rospy.loginfo(f"[push] Using n_safety={n_SAFETY:.2f}")
     
@@ -192,140 +287,65 @@ def main():
         debug=True,               # ENABLE DEBUGGING
         initial_state="BASELINE", # THIS WAS NONE BEFORE, and we set Baseline INSIDE the motion loop
     )
-    rospy.sleep(0.25) # Let things settle for baseline collection
+    rospy.sleep(0.5) # Let things settle for baseline collection
 
 
-    ## =================== BEGIN MOTION SEQUENCE ===================== 
-    # 1) Move to pre-push pose
-    success_prep = ctrl.move_to_pose(pos, quat, timeout=8.0, tol=JOINT_TOL)
-    if not check_manip_success(success_prep, "Pre-push"):
-        return
-    
-
-    # 2) ********** Execute push motion ***********
-    rospy.sleep(1.5) # NICE LONG SLEEP TO LET MOTIONS FINISH AND STABILIZE
-    fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
-    fw.is_active = True
-    est_listener.clear()  # Clear any old estimates
-
-    arm_logs()  # Start logging for push motion
-
-    success_push = ctrl.cartesian_velocity(
-        v=[PUSH_SPEED, 0, 0], # XYZ
-        w=[0, 0, 0],   # RPY
-        duration=DURATION, # 8
-        force_watcher=fw,
-        lock_orient=True,
-    )
-    disarm_logs()  # Stop logging for push motion (triggers estimator to process)
-    fw.is_active = False
-    if not check_manip_success(success_push, "Push"):
-        return
-    
-    # Pull the most recent streaming estimate (if available)
-
-    data = est_listener.wait_for_new_estimate(timeout=3.0)
-    if data:
-        m_est, zc_est, theta_star = data
-        rospy.loginfo(f"[push] Online estimate after first push: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
-    else:
-        rospy.logwarn("[push] No online estimate available after first push.")
-        m_est, zc_est, theta_star = None, None, None
-
-    # *********************************************
-
-
-    # 3) Retract along same linear path
-    success_retract = ctrl.cartesian_velocity(
-        v=[-PUSH_SPEED, 0, 0], # XYZ
-        w=[0, 0, 0],   # RPY
-        duration=ctrl.last_cartesian_duration, # returns ~same distance
-        lock_orient=True,
-    )
-    if not check_manip_success(success_retract, "Retraction"):
-        return
-
-
-    # ================================================
-    # ADAPTIVE SECOND PUSH DECISION BASED ON ESTIMATE
-    # ================================================
-
-    # 4) If no estimate, skip second push, return to original pose
-    if m_est is None or zc_est is None:
-        rospy.logwarn("[push] No online estimate available, returning to initial pose.")
-
-        success_return = ctrl.move_to_pose(pos, quat, timeout=8.0, tol=JOINT_TOL)
-        check_manip_success(success_return, "Return")
-        return
-    
-
-    # 5) If estimate available, decide on next push height, and execute
-    arm_logs()  # Start logging for second push motion
-    margin = 0.1 # 10% margin
-    JOINT_TOL  = 4e-3 # rad
-    next_push_ht = choose_second_push(zc_est, margin=margin, obj_ht=height, n_safety=n_SAFETY)
-
-    rospy.loginfo(f"[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m")
-
-    fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
-
-    # -------------------------------------------------------------
-    # Move to next push height (with one retry)
-    success_return = ctrl.move_to_pose(
-        xyz=[pos[0], pos[1], next_push_ht],
-        quat=quat,
-        timeout=8.0,
-        tol=JOINT_TOL
-    )
-    if not check_manip_success(success_return, "Active Push Return"):
-        rospy.loginfo("[push] Retrying Active Push Return...")
-        success_return2 = ctrl.move_to_pose(
-                            xyz=[pos[0], pos[1], next_push_ht],
-                            quat=quat,
-                            timeout=8.0,
-                            tol=JOINT_TOL
-                        )
-        if not check_manip_success(success_return2, "Active Push Return Retry"):
+    try:
+        ## =================== BEGIN MOTION SEQUENCE ===================== 
+        data = execute_push_sequence(
+            ctrl=ctrl, 
+            pos=pos, 
+            quat=quat, 
+            fw=fw, 
+            est=est, 
+            push_speed=PUSH_SPEED, 
+            duration=DURATION, 
+            joint_tol=JOINT_TOL, 
+            enable_logging=True, # START logging
+            retries=0 # No retries for first push (fail fast if pose unreachable)
+        )
+        if data is None:
+            rospy.signal_shutdown("Push sequence failed.")
             return
-    # -------------------------------------------------------------
-    fw.is_active = True
-    est_listener.clear()  # Clear any old estimates
+        else:
+            m_est, zc_est, theta_star = data
 
-    success_active = ctrl.cartesian_velocity(
-        v=[PUSH_SPEED, 0, 0], # XYZ
-        w=[0, 0, 0],   # RPY
-        duration=DURATION, # 8
-        force_watcher=fw,
-        lock_orient=True,
-    )
-    disarm_logs()  # Stop logging for second push motion
-    fw.is_active = False
-    if not check_manip_success(success_active, "Active Second Push"):
+
         return
 
-     # Pull the most recent streaming estimate (if available)
-    data = est_listener.wait_for_new_estimate(timeout=3.0)
-    if data:
-        m_est, zc_est, theta_star = data
-        rospy.loginfo(f"[push] Online estimate after 2nd push: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
-    else:
-        rospy.logwarn("[push] No online estimate available after second push.")
+        # *********************************************
+        # ADAPTIVE SECOND PUSH DECISION BASED ON ESTIMATE
+        if m_est is None or zc_est is None:
+            rospy.logwarn("[push] No online estimate available, returning to initial pose.")
+            prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=0)
+            est.disarm_logs()  # Ensure logging is stopped
+            rospy.signal_shutdown("No estimate available after first push.")
+        else:
+            margin = 0.1 # 10% margin
+            next_push_ht = choose_second_push(zc_est, margin=margin, obj_ht=height)
+            rospy.loginfo(f"[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m")
 
+        # 5) Move to next pre-push height (with one retry)
+        data = execute_push_sequence(
+            ctrl=ctrl, 
+            pos=[pos[0], pos[1], next_push_ht], 
+            quat=quat, 
+            fw=fw, 
+            est=est, 
+            push_speed=PUSH_SPEED, 
+            duration=DURATION, 
+            joint_tol=JOINT_TOL, 
+            enable_logging=False, # STOP logging
+            retries=1 # One retry for second push to allow for minor corrections
+        )
 
-    # 6) Retract along same linear path
-    success_retract = ctrl.cartesian_velocity(
-        v=[-PUSH_SPEED, 0, 0], # XYZ
-        w=[0, 0, 0],   # RPY
-        duration=ctrl.last_cartesian_duration, # returns ~same distance
-        lock_orient=True,
-    )
-    if not check_manip_success(success_retract, "Retraction"):
+        # 7) Return to original pre-push pose
+        prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=1)
+    finally:
+        rospy.sleep(0.5)
+        est.disarm_logs()  # Ensure logging is stopped AFTER ALL MOTIONS
+        rospy.sleep(0.5)
         return
-    
-    # 7) Return to original pose
-    success_return = ctrl.move_to_pose(pos, quat, timeout=8.0, tol=JOINT_TOL)
-    check_manip_success(success_return, "Return")
-    return
 
 
 

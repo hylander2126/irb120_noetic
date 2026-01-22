@@ -4,7 +4,7 @@ import numpy as np
 
 import rospy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray, Empty
+from std_msgs.msg import Float64MultiArray, Empty, Bool
 from geometry_msgs.msg import PoseStamped
 
 from threading import Lock
@@ -150,6 +150,8 @@ class VelocityController:
         self.vel_pub   = rospy.Publisher(vel_cmd_topic, Float64MultiArray, queue_size=1)
         # Unified FK output for logger and other nodes
         self.fk_pub = rospy.Publisher("/com_3d/tip_pose_fk", PoseStamped, queue_size=200)
+        # Annoying... Need a retraction phase publisher for the estimator... I would prefer this somewhere else
+        self._retract_pub = rospy.Publisher("/com_3d/retract_phase", Bool, queue_size=1, latch=False)
 
         self.rate = rospy.Rate(self.rate_hz)
 
@@ -165,6 +167,9 @@ class VelocityController:
     # =====================================================================
     #   INTERNAL HELPERS
     # =====================================================================
+    def _publish_retract(self, state: Bool):
+        self._retract_pub.publish(state)
+
     def _to_kdl_jnt_array(self, q_np):
         qa = kdl.JntArray(self.nj)
         for i in range(self.nj): qa[i] = float(q_np[i])
@@ -402,7 +407,7 @@ class VelocityController:
         return True if stop_reason == 1 else False
 
 
-    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True, lock_z=True):
+    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True, lock_z=True, pub_retract=False):
         """
         Apply a constant Cartesian twist for 'duration' seconds.
 
@@ -481,11 +486,15 @@ class VelocityController:
                 break
 
             self._publish_velocity(q_dot_cmd)
+            if pub_retract:
+                self._publish_retract(Bool(data=True))
             self.rate.sleep()
         ## ============================ END CARTESIAN MOTION LOOP ============================
 
         # Stop after duration
         self._publish_velocity(np.zeros(self.nj))
+        if pub_retract:
+            self._publish_retract(Bool(data=False))
 
         # Record how long this took so we can 'undo' it in parent function
         self.last_cartesian_duration = (rospy.Time.now() - start_time).to_sec()

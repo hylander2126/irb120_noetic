@@ -75,8 +75,20 @@ class ForceWatcher:
             return
         
         # Publish contact and trigger events continuously.
+        #
+        # IMPORTANT:
+        #   Downstream (streaming_estimator.py) uses /com_3d/fw_contact_status
+        #   as a boolean *mask* to decide which samples are "valid tipping".
+        #   If we only publish True for STATE == "CONTACT", that window can be
+        #   just a handful of samples (e.g., if force drops quickly and we
+        #   transition to TRIGGERED almost immediately). That makes the batch
+        #   fitter think contact never happened.
+        #
+        # We therefore define "contact active" as being in the post-contact
+        # phase where force is meaningful for torque fitting: PEAK + CONTACT.
         try:
-            self.pub_contact.publish(bool(self.contact_latched))
+            contact_active = (self.STATE in ["PEAK", "CONTACT"])
+            self.pub_contact.publish(contact_active)
             self.pub_trigger.publish(self.STATE == "TRIGGERED")
         except rospy.ROSException:
             return
@@ -95,6 +107,7 @@ class ForceWatcher:
         self.median_buf.pop(0)
         self.median_buf.append(f)
         f_med = np.median(self.median_buf)
+
         prev_med = self.prev_med
 
         # ------------ 1) BASELINE / SEARCHING STATE ------------
@@ -116,15 +129,21 @@ class ForceWatcher:
         # ------------ 2) MONITORING FOR CONTACT ------------
         if self.STATE == "MONITOR":
             # Check for sustained rise above baseline
-            if f_med > (self.noise_floor + self.contact_delta):
+            if prev_med is None:
+                df = 0.0 # Catch the first sample
+            else:
+                df = f_med - prev_med # current (smoothed) minus previous
+            
+            cond1 = f_med > (self.noise_floor + self.contact_delta)
+            
+            cond2 = True #f_med > (self.noise_floor + self.min_force_close_zero) # TEMP testing to avoid tiny forces (robot jerk) detecting as contact
+            if cond1 and cond2:
                 self.contact_count += 1
-                self.debug_msg(f"Contact magnitude met: {f_med:.3f} N, Count: {self.contact_count}/{self.contact_samples}")
-                
+                self.debug_msg(f"Contact magnitude met: {f_med:.3f} N, (contact_delta={self.contact_delta:.3f})") if cond1 else None
+                self.debug_msg(f"Contact count: {self.contact_count}/{self.contact_samples}")
                 if self.contact_count >= self.contact_samples:
                     self.STATE = "PEAK"
-                    self.contact_latched = True
-                    self.release_count = 0
-                    rospy.loginfo_once(f"{self.contact_count} CONTACTS DETECTED!")
+                    self.debug_msg(f"{self.contact_count} CONTACTS DETECTED!", 0)
             else:
                 self.contact_count = 0
 
@@ -135,7 +154,7 @@ class ForceWatcher:
             self.peak_buf.append(f_med)
             if self.peak_buf.count(0.0) == 0:
                 self.peak = float(np.max(self.peak_buf))
-                rospy.loginfo_once(f"Peak force recorded: {self.peak:.3f} N")
+                self.debug_msg(f"Peak force recorded: {self.peak:.3f} N", 0)
                 self.STATE = "CONTACT"
 
 
@@ -145,7 +164,7 @@ class ForceWatcher:
             # UPDATE: Continue Tracing Peak if F rises
             if f_med > self.peak:
                 self.peak = f_med
-                rospy.loginfo_once(f"Tracking new peak: {self.peak:.3f} N")
+                self.debug_msg(f"Tracking new peak: {self.peak:.3f} N", 0)
 
             f_safe = self.n_safety * self.peak
             thresh = np.max([f_safe, self.noise_floor])
@@ -166,37 +185,13 @@ class ForceWatcher:
         # ------------ 4) UPDATE PREV_MED ONCE ------------
         self.prev_med = f_med
 
-        # ---------------- Release detection (un-contact) ----------------
-        # Only attempt release if we already latched contact and baseline exists
-        if self.contact_latched and self.baseline_ready:
-            release_thresh = self.noise_floor + self.contact_delta
-
-            # Optional: ignore "tiny jerk" region if you want
-            # release_thresh = max(release_thresh, self.min_force_close_zero)
-
-            if f_med < release_thresh:
-                self.release_count += 1
-                if self.release_count >= self.release_samples:
-                    self.contact_latched = False
-                    self.release_count = 0
-
-                    # If you want, move back to MONITOR automatically for the remainder of the run
-                    # (useful if you keep is_active True through retract)
-                    if self.STATE != "BASELINE":
-                        self.STATE = "MONITOR"
-
-                    rospy.loginfo_once(
-                        f"CONTACT RELEASED (f_med={f_med:.3f} < {release_thresh:.3f} for {self.release_samples} samples).")
-            else:
-                self.release_count = 0
-
 
     def debug_msg(self, msg, throttle=None):
         if self.debug:
             if throttle is None:
                 rospy.loginfo(f"[ForceWatcher] {msg}")
             elif throttle == 0:
-                rospy.loginfo_throttle(f"[ForceWatcher] {msg}", 5.0) # large 5s throttle
+                rospy.loginfo_once(f"[ForceWatcher] {msg}")
             else:
                 rospy.loginfo_throttle(throttle, f"[ForceWatcher] {msg}")
 
@@ -208,8 +203,6 @@ class ForceWatcher:
         self.contact_count = 0
         self.below_count = 0
         self.peak = 0.0
-        self.contact_latched = False
-        self.release_count = 0
 
         # baseline reset
         self.baseline_ready = False

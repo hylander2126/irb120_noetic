@@ -45,6 +45,10 @@ class LiveFitPlotter:
         self.pending_result = None
         self.is_live = False
         self.save_pending = False
+
+        # --- Track Multiple Estimates ---
+        self.estimate_count = 0 # Counter of estimates in current trajectory
+        self.fit_artists = []  # Store fit lines for multiple estimates
         
         # --- Config ---
         self.update_hz = 10.0
@@ -62,7 +66,7 @@ class LiveFitPlotter:
         self.ln_fx, = self.ax_live.plot([], [], 'r-', label='Fx', alpha=0.6)
         self.ln_fy, = self.ax_live.plot([], [], 'g-', label='Fy', alpha=0.6)
         self.ln_fz, = self.ax_live.plot([], [], 'b-', label='Fz', alpha=0.6)
-        self.ax_live.axhline(0.0, color='c', linewidth=0.5)
+        self.ax_live.axhline(0.0, color='c', linewidth=1.0)
         self.ax_live.set_ylabel("Force (N)")
         self.ax_live.set_title("Live Data Stream")
 
@@ -77,6 +81,7 @@ class LiveFitPlotter:
         self.ax_live.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
         self.ax_live.grid(True)
         
+
         # --- SUBPLOT 2: POST-MORTEM RESULT (Bottom) ---
         self.ax_res = self.axs[1]
         self.ax_res.set_xlabel("Object Angle (deg)")
@@ -84,13 +89,15 @@ class LiveFitPlotter:
         self.ax_res.grid(True)
         self.ax_res.set_title("Latest Fit Result (Waiting...)")
 
-        # Placeholders for result plot
-        self.sc_data = self.ax_res.scatter([], [], c='b', alpha=0.3, s=10, label='Measured Data')
-        self.ln_fit, = self.ax_res.plot([], [], 'r--', linewidth=2, label='Fit Model')
+        # Ground truth line (persistent)
         self.ln_gt_th = self.ax_res.axvline(0, color='g', linestyle='--', linewidth=2, label='Ground Truth')
-        self.ln_est_th = self.ax_res.axvline(0, color='m', linestyle='-', linewidth=2, label='Estimate')
-        self.ax_res.axhline(0.0, color='c', linewidth=0.5)
-        self.ax_res.legend(loc="upper right")
+        self.ax_res.axhline(0.0, color='c', linewidth=1.0)
+
+        # Placeholders for result plot
+        # self.sc_data = self.ax_res.scatter([], [], c='b', alpha=0.3, s=10, label='Measured Data')
+        # self.ln_fit, = self.ax_res.plot([], [], 'r--', linewidth=2, label='Fit Model')
+        # self.ln_est_th = self.ax_res.axvline(0, color='m', linestyle='-', linewidth=2, label='Estimate')
+        # self.ax_res.legend(loc="upper right")
 
         # --- Subscribers ---
         rospy.Subscriber('/com_3d/log_start', Empty, self._on_start)
@@ -130,7 +137,13 @@ class LiveFitPlotter:
             self.pending_result = None
             self.save_pending = False
 
-        rospy.loginfo("[Plotter] Log start detected - Cleared buffers.")
+            # Reset estimate counter and clear old fit artists
+            self.estimate_count = 0
+            for artist in self.fit_artists:
+                artist.remove()
+            self.fit_artists.clear()
+
+        rospy.loginfo("[Plotter] Log start detected - Cleared buffers and fit plots.")
 
     def _on_stop(self, _):
         with self.lock:
@@ -215,6 +228,7 @@ class LiveFitPlotter:
     def _update_result_plot_and_save(self):
         """
         Main Thread Helper: Updates the bottom plot if data is pending.
+        Adds new fit line for each estimate received.
         """
         with self.lock:
             if self.pending_result is None:
@@ -224,17 +238,44 @@ class LiveFitPlotter:
             do_save = self.save_pending
             self.save_pending = False
             stem = self.stem or "run"
+            self.estimate_count += 1
+            est_num = self.estimate_count
 
         gt_th_star_rad = rospy.get_param("/com_3d/theta_star", 0.0)
         gt_th_star_deg = np.rad2deg(gt_th_star_rad)
 
-        # Update plot
-        self.sc_data.set_offsets(np.c_[data["th"], data["tau"]])
-        self.ln_fit.set_data(data["th"], data["fit"])
+        # Define colors for different estimates
+        colors = ['blue', 'orange', 'purple']
+        color_idx = (est_num - 1) % len(colors)
+        color = colors[color_idx]
+        # Create label with estimate number
+        alpha_scatter = 0.5 if est_num == 1 else 0.3
+        alpha_line = 1.0 if est_num == 1 else 0.7
 
-        self.ln_est_th.set_xdata([data["th_star"], data["th_star"]])
-        self.ln_est_th.set_label(f'Est $\\theta^*$ ({data["th_star"]:.1f}$^\\circ$)')
+        # Add a new scatter plot for this estimate
+        sc = self.ax_res.scatter(
+            data["th"], data["tau"], 
+            c=color, alpha=alpha_scatter, s=10, 
+            label='_' #f'Push {est_num} Data'
+        )
 
+        # Add a new fit line for this estimate
+        ln, = self.ax_res.plot(
+            data["th"], data["fit"], 
+            color=color, linestyle='--', linewidth=2, alpha=alpha_line,
+            label=f'Push {est_num} Fit (m={data["m"]:.2f}kg, zc={data["z"]:.3f}m)'
+        )
+
+        # Add estimate theta* line
+        vl = self.ax_res.axvline(
+            data["th_star"], 
+            color=color, linestyle='-', linewidth=2, alpha=alpha_line,
+            label=f'Push {est_num} θ*={data["th_star"]:.1f}°'
+        )
+        # Store artists for potential removal later
+        self.fit_artists.extend([sc, ln, vl])
+
+        # Update GT line
         self.ln_gt_th.set_xdata([gt_th_star_deg, gt_th_star_deg])
         self.ln_gt_th.set_label(f'GT $\\theta^*$ ({gt_th_star_deg:.1f}$^\\circ$)')
 
@@ -245,15 +286,13 @@ class LiveFitPlotter:
 
         # Save (paper-ready)
         if do_save:
-            # pdf_path = os.path.join(self.out_dir, stem + "_fit.pdf")
-            png_path = os.path.join(self.out_dir, stem + "_fit.png")
+            png_path = os.path.join(self.out_dir, f"{stem}_fit_est{est_num}.png")
 
             try:
                 # Render first
                 self.fig.canvas.draw_idle()
                 self.fig.canvas.flush_events()
 
-                # self.fig.savefig(pdf_path, bbox_inches="tight")
                 self.fig.savefig(png_path, dpi=300, bbox_inches="tight")
                 rospy.loginfo("[Plotter] Saved: %s", png_path)
             except Exception as e:

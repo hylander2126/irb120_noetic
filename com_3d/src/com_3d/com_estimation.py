@@ -10,7 +10,6 @@ def tau_app_model(F, rf):
 
     rf must be same shape as F (N, 3) and must account for object rotation.
     """
-    # return np.cross(F, rf)
     tau = np.cross(rf, F)  # (N,3)
     return tau.ravel()
 
