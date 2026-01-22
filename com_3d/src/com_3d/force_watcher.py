@@ -17,8 +17,6 @@ class ForceWatcher:
     def __init__(
             self,
             n_safety=0.9, # n_safety = 0 is NO safety and =1 is FULL safety (stop push upon contact)
-            baseline_window=50,
-            median_window=5,
             debug=False,
             initial_state=None # (i.e. for starting baseline after motion)
         ):
@@ -27,30 +25,29 @@ class ForceWatcher:
         self.F_STOP_SAFETY = 9.0 # N absolute max stop (regardless of n_safety and peak) FINGER IS CAUGHT ON SOMETHING....
 
         self.is_active = False
-        self.contact_latched = False # True upon contact; latched until reset
 
         # Baseline / noise estimation
-        self.baseline_buf = [0.0] * baseline_window # prepare empty buffer
+        self.baseline_buf = [0.0] * 50 # prepare empty buffer (50 samples is good)
         self.baseline_ready = False
         self.noise_floor = 0.0
 
-        self.median_buf = [0.0] * median_window # Median smoothing
-        self.peak_buf = [0.0] * 50 # 5 being the peak window
+        self.median_buf = [0.0] * 5 # Median smoothing (5-sample window is good, but still responsive)
 
         # Contact detection parameters
         self.contact_delta = 0.09  # N above baseline to declare contact (this is our resolution!)
-        self.contact_samples = 4  # consecutive samples needed for contact
-        self.release_samples = 8  # consecutive samples needed for release (no more contact)
+        self.contact_required = 4  # consecutive samples needed for contact
+        self.release_delta = 0.03  # N below baseline to declare release (smaller than contact so we don't unlatch while pushing)
+        self.release_required = 8  # consecutive samples needed for release (no more contact)
 
         # Falling / trigger parameters
         self.fall_samples = 5     # consecutive samples needed for falling trigger
 
         # State
         self.STATE = initial_state
-        self.trigger = False
+        self.trigger_latched = False
+        self.contact_latched = False # True upon contact; latched until reset
         self.peak = 0.0
 
-        self.prev_med = None
         self.contact_count = 0
         self.release_count = 0
         self.below_count = 0
@@ -59,6 +56,7 @@ class ForceWatcher:
 
         # The following publishers are so that logging can record when contact and trigger occurs
         self.pub_contact = rospy.Publisher('/com_3d/fw_contact_status', Bool, queue_size=1, latch=True)
+        self.pub_retract = rospy.Publisher("/com_3d/retract_phase",     Bool, queue_size=1, latch=False)
         self.pub_trigger = rospy.Publisher('/com_3d/fw_trigger_status', Bool, queue_size=1, latch=True)
 
         # Looks like lshape (lightest) has peaks F: 0.117 -> 0.128 -> 0.248 -> 0.331
@@ -66,36 +64,66 @@ class ForceWatcher:
         rospy.loginfo(f"[ForceWatcher] Armed with n_safety={self.n_safety}.")
 
 
+    def reset(self, force_state="BASELINE"):
+        """Full reset of all state variables and publishers."""
+        self.STATE = force_state # Or MONITOR if you prefer
+        self.trigger_latched = False
+        self.contact_latched = False
+        self.contact_count = 0
+        self.below_count = 0
+        self.peak = 0.0
+        self.release_count = 0
+
+        # baseline reset
+        self.baseline_ready = False
+        self.baseline_buf = [0.0] * len(self.baseline_buf)
+
+        # clear history
+        self.median_buf = [0.0] * len(self.median_buf)
+        
+        # Publish the cleared state immediately to update latched topics
+        self.pub_contact.publish(False)
+        self.pub_trigger.publish(False)
+        self.pub_retract.publish(False)
+        # rospy.loginfo("[ForceWatcher] State reset for new run.")
+
+
     def ft_cb(self, msg):
-        # Bail out if shutdown
+        # Bail out if shutdown or not active
         if rospy.is_shutdown():
-            return
-        # Bail out if not active
-        if not self.is_active:
             return
         
         # Publish contact and trigger events continuously.
         try:
-            self.pub_contact.publish(bool(self.contact_latched))
-            self.pub_trigger.publish(self.STATE == "TRIGGERED")
+            self.pub_contact.publish(self.STATE == "CONTACT" or self.contact_latched)
+            self.pub_trigger.publish(self.STATE == "RETRACTING" or self.trigger_latched) # HMMM they are kinda the same...
+            self.pub_retract.publish(self.STATE == "RETRACTING" or self.trigger_latched)
         except rospy.ROSException:
             return
+        
+        # If not active, allow publishing (above) but do not process further
+        if not self.is_active:
+            # Don't reset the whole thing here, just unlatch after retracting finished
+            self.STATE = None
+            self.trigger_latched = False
+            self.contact_latched = False
+            return
 
+        # Read force components
         fx, fy, fz = msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z
-        f = np.linalg.norm([fx, fy, fz])
+        f_mag = float(np.linalg.norm([fx, fy, fz]))
 
-        # Bail out if force (components or norm) exceeds absolute max
-        if abs(fx) > self.F_STOP_SAFETY or abs(fy) > self.F_STOP_SAFETY or abs(fz) > self.F_STOP_SAFETY or f > self.F_STOP_SAFETY:
-            rospy.logerr(f"Absolute force limit exceeded! Fx: {fx:.3f} N, Fy: {fy:.3f} N, Fz: {fz:.3f} N, |F|: {f:.3f} N")
-            self.pub_trigger.publish(True)
-            self.trigger = True
+        # Bail out COMPLETELY if force (components or norm) exceeds absolute max
+        if f_mag > self.F_STOP_SAFETY:
+            rospy.logerr(f"Absolute force limit exceeded! |F|: {f_mag:.3f} N")
+            self.state = "RETRACTING"
+            self.trigger_latched = True
             return
 
         # Median smoothing (rolling window)
         self.median_buf.pop(0)
-        self.median_buf.append(f)
+        self.median_buf.append(f_mag)
         f_med = np.median(self.median_buf)
-        prev_med = self.prev_med
 
         # ------------ 1) BASELINE / SEARCHING STATE ------------
         if self.STATE == "BASELINE":
@@ -118,77 +146,58 @@ class ForceWatcher:
             # Check for sustained rise above baseline
             if f_med > (self.noise_floor + self.contact_delta):
                 self.contact_count += 1
-                self.debug_msg(f"Contact magnitude met: {f_med:.3f} N, Count: {self.contact_count}/{self.contact_samples}")
+                self.debug_msg(f"Contact magnitude met: {f_med:.3f} N, Count: {self.contact_count}/{self.contact_required}")
                 
-                if self.contact_count >= self.contact_samples:
-                    self.STATE = "PEAK"
+                # Once enough samples detected, latch contact and move to PEAK state
+                if self.contact_count >= self.contact_required:
+                    self.STATE = "CONTACT"
                     self.contact_latched = True
                     self.release_count = 0
-                    rospy.loginfo_once(f"{self.contact_count} CONTACTS DETECTED!")
             else:
                 self.contact_count = 0
-
-        # ------------ 3) PEAK TRACKING ------------
-        if self.STATE == "PEAK":
-            # Record the peak and average over several samples
-            self.peak_buf.pop(0)
-            self.peak_buf.append(f_med)
-            if self.peak_buf.count(0.0) == 0:
-                self.peak = float(np.max(self.peak_buf))
-                rospy.loginfo_once(f"Peak force recorded: {self.peak:.3f} N")
-                self.STATE = "CONTACT"
-
 
         # ------------ 3) CONTACT / PEAK TRACING ------------
         if self.STATE == "CONTACT":
             
             # UPDATE: Continue Tracing Peak if F rises
-            if f_med > self.peak:
-                self.peak = f_med
-                rospy.loginfo_once(f"Tracking new peak: {self.peak:.3f} N")
+            old_peak = self.peak
+            self.peak = max(self.peak, f_med)
+            if self.peak > old_peak:
+                rospy.loginfo(f"Tracing new peak: {self.peak:.3f} N")
 
             f_safe = self.n_safety * self.peak
-            thresh = np.max([f_safe, self.noise_floor])
+            thresh = max(f_safe, self.noise_floor)
 
             self.debug_msg(f"Current: {f_med:.3f}N  Peak: {self.peak:.3f} N  f_safe: {f_safe:.3f} N", 0.1)
             
+            # Only check f_safe if peak is non-zero
             if self.peak > 0.0:
                 if f_med < thresh:
                     self.below_count += 1
                     if self.below_count >= self.fall_samples:
-                        self.STATE = "TRIGGERED"
-                        self.pub_trigger.publish(1)
-                        self.trigger = True
-                        self.debug_msg(f"Stop triggered(peak: {self.peak:.3f} N, threshold: {thresh:.3f} N, current: {f_med:.3f} N).")
+                        self.STATE = "RETRACTING"
+                        self.trigger_latched = True
+                        self.debug_msg(f"STOP! peak: {self.peak:.3f} N, f_safe: {thresh:.3f}, last: {f_med:.3f}")
                 else:
                     self.below_count = 0
-        
-        # ------------ 4) UPDATE PREV_MED ONCE ------------
-        self.prev_med = f_med
 
         # ---------------- Release detection (un-contact) ----------------
-        # Only attempt release if we already latched contact and baseline exists
-        if self.contact_latched and self.baseline_ready:
-            release_thresh = self.noise_floor + self.contact_delta
-
-            # Optional: ignore "tiny jerk" region if you want
-            # release_thresh = max(release_thresh, self.min_force_close_zero)
+        if self.STATE == "RETRACTING":
+            # Only attempt release if we already latched contact and baseline exists
+            release_thresh = self.noise_floor + self.release_delta
 
             if f_med < release_thresh:
                 self.release_count += 1
-                if self.release_count >= self.release_samples:
+                if self.release_count >= self.release_required:
                     self.contact_latched = False
                     self.release_count = 0
 
-                    # If you want, move back to MONITOR automatically for the remainder of the run
-                    # (useful if you keep is_active True through retract)
-                    if self.STATE != "BASELINE":
-                        self.STATE = "MONITOR"
-
                     rospy.loginfo_once(
-                        f"CONTACT RELEASED (f_med={f_med:.3f} < {release_thresh:.3f} for {self.release_samples} samples).")
+                        f"CONTACT RELEASED (f_med={f_med:.3f} < {release_thresh:.3f} for {self.release_required} samples).")
             else:
                 self.release_count = 0
+
+        # NOTE: We STAY in RETRACTING until reset (in push.py) This is so that we can capture the retract phase for fitting.
 
 
     def debug_msg(self, msg, throttle=None):
@@ -199,28 +208,3 @@ class ForceWatcher:
                 rospy.loginfo_throttle(f"[ForceWatcher] {msg}", 5.0) # large 5s throttle
             else:
                 rospy.loginfo_throttle(throttle, f"[ForceWatcher] {msg}")
-
-
-    def reset(self, force_state="BASELINE"):
-        """Full reset of all state variables and publishers."""
-        self.STATE = force_state # Or MONITOR if you prefer
-        self.trigger = False
-        self.contact_count = 0
-        self.below_count = 0
-        self.peak = 0.0
-        self.contact_latched = False
-        self.release_count = 0
-
-        # baseline reset
-        self.baseline_ready = False
-        self.baseline_buf = [0.0] * len(self.baseline_buf)
-
-        # clear history
-        self.median_buf = [0.0] * len(self.median_buf)
-        self.peak_buf = [0.0] * len(self.peak_buf)
-        self.prev_med = None
-        
-        # Publish the cleared state immediately to update latched topics
-        self.pub_contact.publish(False)
-        self.pub_trigger.publish(False)
-        rospy.loginfo("[ForceWatcher] State reset for new run.")

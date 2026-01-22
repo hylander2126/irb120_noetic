@@ -193,7 +193,6 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
     Args:
         enable_logging: If True, start/stop logging around this push sequence
     """
-    # 1) Pre-push procedure (move to pose, reset fw, clear est, arm est, and enable logging if needed)
     success_prepush = prepush_procedure(ctrl, pos, quat, joint_tol, retries)
     if not success_prepush:
         est.disarm_logs()  # Ensure logging is stopped if max retries exceeded
@@ -202,10 +201,11 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
     fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
     fw.is_active = True
     est.clear()  # Clear any old estimates
+    rospy.sleep(1.0) # NICE LONG SLEEP TO LET MOTIONS FINISH AND STABILIZE
+    est.arm_estimate()  # Start estimator
 
-    rospy.sleep(1.0) # Sleep to allow baseline collection and settling
-    est.arm_estimate()  # Start estimator (start acccumulating)
-    est.arm_logs() if enable_logging else None  # Start logging if needed
+    if enable_logging:
+        est.arm_logs()  # Start logging for push motion
 
     success_push = ctrl.cartesian_velocity(
         v=[push_speed, 0, 0], # XYZ
@@ -214,22 +214,29 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
         force_watcher=fw,
         lock_orient=True,
     )
+    # disarm_estimate()  # Stop estimator
+    # fw.is_active = False
     if not check_manip_success(success_push, "Push"):
         est.disarm_logs()  # Ensure logging is stopped
         return None
+    
+    # Pull the most recent streaming estimate (if available)
+    # data = est.wait_for_new_estimate(timeout=3.0) # Returns None, None, None if no estimate available
+    
+    # est.publish_retract(True)  # Notify estimator of retract phase
+    # rospy.sleep(0.1)  # Small delay to ensure retract phase is registered
 
     success_retract = ctrl.cartesian_velocity(
         v=[-push_speed, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
-        duration=ctrl.last_cartesian_duration, # returns ~same distance buffer to be safe
+        duration=ctrl.last_cartesian_duration + 0.2, # returns ~same distance + 0.2 buffer to be safe
         force_watcher=None, # No force watcher on retract
         lock_orient=True,
     )
+    # est.publish_retract(False)  # Notify estimator retract phase is over
     fw.is_active = False
     est.disarm_estimate()  # Stop estimator
     data = est.wait_for_new_estimate(timeout=3.0) # Returns None, None, None if no estimate available
-    
-    # Check for success AFTER disarming everything to ensure clean state
     if not check_manip_success(success_retract, "Retraction"):
         est.disarm_logs()  # Ensure logging is stopped
         return None
@@ -239,6 +246,8 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
 
 def main():
     rospy.init_node("push")
+
+    est = EstimateListener()
 
     DURATION    = 12.0#22.0 # 12.0 secs # I halved the push speed, so have to double duration
     PUSH_SPEED  = 0.01#0.005 # 0.01 m/s
@@ -267,8 +276,8 @@ def main():
     rospy.set_param("/com_3d/rc0_known", list([com[0], com[1], 0.0]))
     rospy.set_param("/com_3d/theta_star", float(theta_star))
 
-    # Estimate listener
-    est = EstimateListener()
+    rospy.loginfo(f"[push] Preparing to push object '{object_name}'.")
+
     # Velocity controller
     ctrl = VelocityController(max_joint_vel=1.0)
     # Force watcher
@@ -277,9 +286,6 @@ def main():
         debug=True,               # ENABLE DEBUGGING
         initial_state="BASELINE", # THIS WAS NONE BEFORE, and we set Baseline INSIDE the motion loop
     )
-
-    rospy.loginfo(f"[push] Preparing to push object '{object_name}'.")
-    
     rospy.sleep(0.5) # Let things settle for baseline collection
 
 

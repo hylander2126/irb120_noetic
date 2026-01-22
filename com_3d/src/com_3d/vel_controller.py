@@ -150,8 +150,6 @@ class VelocityController:
         self.vel_pub   = rospy.Publisher(vel_cmd_topic, Float64MultiArray, queue_size=1)
         # Unified FK output for logger and other nodes
         self.fk_pub = rospy.Publisher("/com_3d/tip_pose_fk", PoseStamped, queue_size=200)
-        # Annoying... Need a retraction phase publisher for the estimator... I would prefer this somewhere else
-        self._retract_pub = rospy.Publisher("/com_3d/retract_phase", Bool, queue_size=1, latch=False)
 
         self.rate = rospy.Rate(self.rate_hz)
 
@@ -316,7 +314,7 @@ class VelocityController:
         kd_joints = self.kd_joints
         ki_joints = self.ki_joints
 
-        rospy.loginfo(f"[VC] move_to_joint_positions:\n{q_target}")
+        rospy.loginfo(f"[VC] move_to_joint_positions:\n{np.round(q_target, decimals=3)}")
 
         _wait_for_egm_active(target_active=True, timeout=5.0)
 
@@ -354,7 +352,7 @@ class VelocityController:
                     within_since = rospy.Time.now()
                 elif (rospy.Time.now() - within_since).to_sec() >= dwell_time:
                     rospy.loginfo("[VC] Joint target reached. Joint errors:\n"
-                                  f"{q_target - q_curr}")
+                                  f"{np.round(q_target - q_curr, decimals=3)}")
                     stop_reason = 1 # 'good' stop
                     break
             else:
@@ -407,7 +405,7 @@ class VelocityController:
         return True if stop_reason == 1 else False
 
 
-    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True, lock_z=True, pub_retract=False):
+    def cartesian_velocity(self, v, w, duration, force_watcher=None, lock_orient=True, lock_z=True):
         """
         Apply a constant Cartesian twist for 'duration' seconds.
 
@@ -444,7 +442,7 @@ class VelocityController:
                         force_watcher.reset(force_state="MONITOR")
                 else:
                     rospy.loginfo_once("[VC] Force watcher is active and Monitoring!!")
-                    if force_watcher.trigger:
+                    if force_watcher.trigger_latched or force_watcher.STATE == "RETRACTING":
                         early_stop_reason = 1 # 'good' stop
                         break
 
@@ -486,15 +484,11 @@ class VelocityController:
                 break
 
             self._publish_velocity(q_dot_cmd)
-            if pub_retract:
-                self._publish_retract(Bool(data=True))
             self.rate.sleep()
         ## ============================ END CARTESIAN MOTION LOOP ============================
 
         # Stop after duration
         self._publish_velocity(np.zeros(self.nj))
-        if pub_retract:
-            self._publish_retract(Bool(data=False))
 
         # Record how long this took so we can 'undo' it in parent function
         self.last_cartesian_duration = (rospy.Time.now() - start_time).to_sec()

@@ -185,14 +185,6 @@ class BatchEstimator:
             r_raw = np.array(self.retracts, dtype=bool)
         rospy.loginfo(f"[BatchEstimator] Processing batch of {len(time)} samples...")
 
-        # DEBUG BLOCK:
-        rospy.loginfo(f"[BatchEstimator] RAW DATA CHECK:")
-        rospy.loginfo(f"  Total samples: {len(time)}")
-        rospy.loginfo(f"  Contact True count: {np.sum(c_raw)} / {len(c_raw)}")
-        rospy.loginfo(f"  Retract True count: {np.sum(r_raw)} / {len(r_raw)}")
-        rospy.loginfo(f"  Contact samples: {c_raw[:20]}...")  # First 20
-        rospy.loginfo(f"  Retract samples: {r_raw[:20]}...")  # First 20
-
         # -----------------------------------------------------------
         # 1. PROCESS & FILTER 
         # -----------------------------------------------------------
