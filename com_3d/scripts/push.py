@@ -91,9 +91,12 @@ class EstimateListener:
     Helper to listen for online estimates reliably.
     Prevents race conditions by maintaining a persistent subscriber.
     """
-    def __init__(self):
+    def __init__(self, com=None, mass=None, theta_star=None):
         self._data = None
         self._received = False
+        self.gt_com = com
+        self.gt_mass = mass
+        self.gt_thst = theta_star
         # Persistent subscriber ensures we don't miss unlatched messages
         self._sub = rospy.Subscriber("/com_3d/online_estimate", Float64MultiArray, self._cb)
 
@@ -124,7 +127,10 @@ class EstimateListener:
             if self._received:
                 out = self._data
                 m_est, zc_est, theta_star = out
-                rospy.loginfo(f"[push] Received online estimate data: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
+                rospy.loginfo(f"[push] ===============================================================")
+                rospy.loginfo(f"[push] RECEIVED ESTIMATE: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
+                rospy.loginfo(f"[push] error (unknown to estimator): m={m_est - self.gt_mass:.3f} kg, zc={zc_est - self.gt_com[2]:.3f} m, theta*={np.degrees(theta_star - self.gt_thst):.2f} deg")
+                rospy.loginfo(f"[push] ===============================================================")
                 return out
             
             if (rospy.Time.now() - start).to_sec() > timeout:
@@ -162,7 +168,7 @@ def choose_second_push(zc_est, margin, obj_ht):
     assert 0.0 <= margin <= 1.0, "Margin must be between 0 and 1."
     next_push_ht = zc_est + (zc_est * margin)
 
-    next_push_ht = np.clip(next_push_ht, 0.065, obj_ht) # min just above floor z safety (0.06) constraint, max object height
+    next_push_ht = np.clip(next_push_ht, 0.095, obj_ht) # min above smallest object COM (for safety, bandaid fix), max at object height
 
     return next_push_ht
     
@@ -237,7 +243,7 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
 def main():
     rospy.init_node("push")
 
-    DURATION    = 24.0 # 12.0 secs # I halved the push speed, so have to double duration
+    DURATION    = 26.0 # 12.0 secs # I halved the push speed, so have to double duration
     PUSH_SPEED  = 0.005 # 0.01 m/s
     JOINT_TOL   = 2e-3 # rad
 
@@ -249,6 +255,7 @@ def main():
         rospy.signal_shutdown(f"[push] n_safety must be in [0,1], got n_safety={n_SAFETY}")
     
     rospy.loginfo(f"[push] Using n_safety={n_SAFETY:.2f}")
+    rospy.set_param("/com_3d/n_safety", n_SAFETY)
     
 
     # Publish some params globally for estimation and logging
@@ -265,7 +272,7 @@ def main():
     rospy.set_param("/com_3d/theta_star", float(theta_star))
 
     # Estimate listener
-    est = EstimateListener()
+    est = EstimateListener(com=com, mass=OBJECT_MOTIONS[object_name]["mass"], theta_star=theta_star)
     # Velocity controller
     ctrl = VelocityController(max_joint_vel=1.0)
     # Force watcher
@@ -308,12 +315,14 @@ def main():
             prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=0)
             rospy.signal_shutdown("No estimate available after first push.")
             return
-        else:
-            margin = 0.1 # 10% margin
-            next_push_ht = choose_second_push(zc_est, margin=margin, obj_ht=height)
-            rospy.loginfo(f"[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m")
-
+        
+        
+        margin = 0.1 # 10% margin
+        next_push_ht = choose_second_push(zc_est, margin=margin, obj_ht=height)
+        rospy.loginfo(f"\n[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m\n")
+        input("[push] Press Enter to continue to second push...")
         # *********************************************
+
         # WORKAROUND FOR STUPID F'IN robot that almost collides when asked to move down literally 3 centimeters
         # find change in z in meters
         delta_z = next_push_ht - pos[2]
@@ -328,6 +337,7 @@ def main():
             duration=time_needed,
             force_watcher=None,
             lock_orient=True,
+            lock_z=False, # ALLOW Z MOTION
         )
         if not check_manip_success(success_approach, "Safe approach to next push height"):
             rospy.signal_shutdown("Safe approach to next push height failed.")

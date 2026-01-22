@@ -18,13 +18,8 @@ class LiveFitPlotter:
         self.lock = threading.Lock()
 
         # --- Naming + output (match FTClockLogger) ---
-        self.run_base = rospy.get_param("~run_base", None)
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pkg = rospkg.RosPack().get_path("com_3d")
-        self.out_dir = os.path.join(pkg, "experiments")
-        os.makedirs(self.out_dir, exist_ok=True)
-        self.traj_idx = 0
-        self.stem = None  # current run stem for saving
+        self.out_dir = None
+        self.log_stem = None
 
         # --- Live Data Buffers (Separated for different rates) ---
         self.t_start = None
@@ -83,7 +78,6 @@ class LiveFitPlotter:
         self.ax_live.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
         self.ax_live.grid(True)
         
-
         # --- SUBPLOT 2: POST-MORTEM RESULT (Bottom) ---
         self.ax_fit = self.axs[1]
         self.ax_fit.set_xlabel("Object Angle (deg)")
@@ -94,12 +88,6 @@ class LiveFitPlotter:
         # Ground truth line (persistent)
         self.ln_gt_th = self.ax_fit.axvline(0, color='g', linestyle='--', linewidth=2, label='Ground Truth')
         self.ax_fit.axhline(0.0, color='c', linewidth=1.0)
-
-        # Placeholders for result plot
-        # self.sc_data = self.ax_res.scatter([], [], c='b', alpha=0.3, s=10, label='Measured Data')
-        # self.ln_fit, = self.ax_res.plot([], [], 'r--', linewidth=2, label='Fit Model')
-        # self.ln_est_th = self.ax_res.axvline(0, color='m', linestyle='-', linewidth=2, label='Estimate')
-        # self.ax_res.legend(loc="upper right")
 
         # --- Subscribers ---
         rospy.Subscriber('/com_3d/log_start', Empty, self._on_start)
@@ -112,17 +100,13 @@ class LiveFitPlotter:
 
     def _build_stem(self):
         """Match FTClockLogger naming convention exactly."""
-        return rospy.get_param("/com_3d/current_log_stem", None)
-        # object_name = rospy.get_param("/com_3d/object_name", "unknown")
-        # base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
-        # return f"{base}_t{self.traj_idx:02d}"
+        self.log_stem = rospy.get_param("/com_3d/current_log_stem", None)
+        self.out_dir = rospy.get_param("/com_3d/current_log_dir", ".")
 
     def _on_start(self, _):
         """Reset live plots when a new log starts."""
         with self.lock:
-            self.traj_idx += 1
-            self.stem = self._build_stem()
-
+            self._build_stem()
             self.t_start = rospy.get_time()
             self.live_t_ft = []
             self.live_f = []
@@ -246,12 +230,15 @@ class LiveFitPlotter:
             self.pending_result = None
             do_save = self.save_pending
             self.save_pending = False
-            stem = self.stem or "run"
             self.estimate_count += 1
             est_num = self.estimate_count
 
         gt_th_star_rad = rospy.get_param("/com_3d/theta_star", 0.0)
         gt_th_star_deg = np.rad2deg(gt_th_star_rad)
+
+        # Update title to reflect n_safety value for this run
+        n_safety = rospy.get_param("/com_3d/n_safety", 0.0)
+        self.ax_live.set_title(f"Live Data Stream (n_safety={n_safety})")
 
         # Define colors for different estimates
         colors = ['blue', 'orange', 'purple']
@@ -295,14 +282,19 @@ class LiveFitPlotter:
 
         # Save (paper-ready)
         if do_save:
-            png_path = os.path.join(self.out_dir, f"{stem}_fit_est{est_num}.png")
+            if self.out_dir == '.' or self.log_stem is None:
+                try:
+                    self._build_stem() # Try again in case it wasn't set in sync_logger yet
+                except:
+                    pass
+            png_path = os.path.join(self.out_dir, self.log_stem + "_fit_plot.png")
 
             try:
                 # Render first
                 self.fig.canvas.draw_idle()
                 self.fig.canvas.flush_events()
 
-                self.fig.savefig(png_path, dpi=300, bbox_inches="tight")
+                self.fig.savefig(png_path, dpi=300, bbox_inches="tight") # TIGHT LAYOUT looks good but title overlaps...
                 rospy.loginfo("[Plotter] Saved: %s", png_path)
             except Exception as e:
                 rospy.logwarn("[Plotter] Save failed: %s", str(e))

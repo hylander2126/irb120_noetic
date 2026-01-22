@@ -91,15 +91,17 @@ class FTClockLogger:
     def _start(self, _):
         with self.csv_lock:
             if self.recording: return
-            self.traj_idx += 1
+            # self.traj_idx += 1
             # Build a base name from datetime + object name
             object_name = rospy.get_param('/com_3d/object_name', 'unknown')
+            n_safety = round(rospy.get_param('/com_3d/n_safety', 0.0), 2)
             base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
-            stem = f"{base}_t{self.traj_idx:02d}"
+            stem = f"{base}_{n_safety}" # t{self.traj_idx:02d}"
 
+            # Publish current log stem and dir for other nodes (e.g. live plotter and estimator)
             rospy.set_param('/com_3d/current_log_stem', stem)
             rospy.set_param('/com_3d/current_log_dir',  self.out_dir)
-            
+
             path = os.path.join(self.out_dir, stem + ".csv")
             self.video_path = os.path.join(self.out_dir, stem + ".mp4")
             
