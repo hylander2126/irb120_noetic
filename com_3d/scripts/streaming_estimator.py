@@ -7,6 +7,7 @@ from threading import Lock
 from scipy.signal import butter, filtfilt
 from scipy.optimize import curve_fit
 from scipy.stats import linregress
+import os
 
 from apriltag_ros.msg import AprilTagDetectionArray
 from com_3d.com_estimation import tau_app_model, tau_model
@@ -252,12 +253,25 @@ class BatchEstimator:
             
             m_est, zc_est, ths_est, w_push, w_retr = self._combine_two_fits(fit_push, fit_retr)
 
-            rospy.loginfo(f"[BatchEstimator] Fit Results:")
-            rospy.loginfo(f"  Push Phase:    m={fit_push['m']:.3f} kg, zc={fit_push['zc']:.3f} m, th*={np.rad2deg(fit_push['ths']):.2f} deg, MSE={fit_push['mse']:.4f}")
-            rospy.loginfo(f"  Retract Phase:  m={fit_retr['m']:.3f} kg, zc={fit_retr['zc']:.3f} m, th*={np.rad2deg(fit_retr['ths']):.2f} deg, MSE={fit_retr['mse']:.4f}")
-            rospy.loginfo(f"  Weights: push={w_push:.4f}, retract={w_retr:.4f}")
-            rospy.loginfo(f"  COMBINED:      m={m_est:.3f} kg, zc={zc_est:.3f} m, th*={np.rad2deg(ths_est):.2f} deg")
-            
+            # WRITE SUMMARY TO FILE
+            # -------------------------------------------------------
+            log_stem = rospy.get_param("/com_3d/current_log_stem", None)
+            out_dir = rospy.get_param("/com_3d/current_log_dir",  ".")
+
+            path = os.path.join(out_dir, log_stem + "_fit_summary.txt") if log_stem else None
+            try:
+                with open(path, "a") as f:
+                    f.write(f"Batch Fit Results:\n")
+                    f.write(f"  Push Phase:    m={fit_push['m']:.3f} kg, zc={fit_push['zc']:.3f} m, th*={np.rad2deg(fit_push['ths']):.2f} deg, MSE={fit_push['mse']:.4f}\n")
+                    f.write(f"  Retract Phase: m={fit_retr['m']:.3f} kg, zc={fit_retr['zc']:.3f} m, th*={np.rad2deg(fit_retr['ths']):.2f} deg, MSE={fit_retr['mse']:.4f}\n")
+                    f.write(f"  Weights: push={w_push:.4f}, retract={w_retr:.4f}\n")
+                    f.write(f"  COMBINED:      m={m_est:.3f} kg, zc={zc_est:.3f} m, th*={np.rad2deg(ths_est):.2f} deg\n")
+                    f.write("\n")
+                rospy.loginfo(f"[BatchEstimator] Fit summary written to: {path}")
+            except Exception as e:
+                rospy.logwarn(f"[BatchEstimator] Could not write fit summary to file: {e}")
+                
+
             # -------------------------------------------------------
             # 6. DEBUG DATA (combine push + retr for plotting)
             # Fit curve uses combined params

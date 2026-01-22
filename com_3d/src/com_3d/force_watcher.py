@@ -138,7 +138,7 @@ class ForceWatcher:
                     # Estimate noise floor as median of baseline buffer/window
                     self.noise_floor = float(np.median(self.baseline_buf))
             else:
-                self.debug_msg(f"Noise floor: {self.noise_floor:.3f} N  Contact delta: {self.contact_delta:.3f} N\n Combined: {self.noise_floor + self.contact_delta:.3f} N", 0)
+                rospy.loginfo_once(f"Noise floor: {self.noise_floor:.3f} N  Contact delta: {self.contact_delta:.3f} N\n Combined: {self.noise_floor + self.contact_delta:.3f} N")
                 self.STATE = "MONITOR"
         
         # ------------ 2) MONITORING FOR CONTACT ------------
@@ -205,6 +205,6 @@ class ForceWatcher:
             if throttle is None:
                 rospy.loginfo(f"[ForceWatcher] {msg}")
             elif throttle == 0:
-                rospy.loginfo_throttle(f"[ForceWatcher] {msg}", 5.0) # large 5s throttle
+                rospy.loginfo_throttle(5.0, f"[ForceWatcher] {msg}") # large 5s throttle
             else:
                 rospy.loginfo_throttle(throttle, f"[ForceWatcher] {msg}")

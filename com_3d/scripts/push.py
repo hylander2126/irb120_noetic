@@ -196,7 +196,6 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
     # 1) Pre-push procedure (move to pose, reset fw, clear est, arm est, and enable logging if needed)
     success_prepush = prepush_procedure(ctrl, pos, quat, joint_tol, retries)
     if not success_prepush:
-        est.disarm_logs()  # Ensure logging is stopped if max retries exceeded
         return None
     
     fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
@@ -215,7 +214,6 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
         lock_orient=True,
     )
     if not check_manip_success(success_push, "Push"):
-        est.disarm_logs()  # Ensure logging is stopped
         return None
 
     success_retract = ctrl.cartesian_velocity(
@@ -231,7 +229,6 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
     
     # Check for success AFTER disarming everything to ensure clean state
     if not check_manip_success(success_retract, "Retraction"):
-        est.disarm_logs()  # Ensure logging is stopped
         return None
 
     return data  # m_est, zc_est, theta_star
@@ -240,8 +237,8 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
 def main():
     rospy.init_node("push")
 
-    DURATION    = 12.0#22.0 # 12.0 secs # I halved the push speed, so have to double duration
-    PUSH_SPEED  = 0.01#0.005 # 0.01 m/s
+    DURATION    = 24.0 # 12.0 secs # I halved the push speed, so have to double duration
+    PUSH_SPEED  = 0.005 # 0.01 m/s
     JOINT_TOL   = 2e-3 # rad
 
     n_SAFETY = rospy.get_param("~n_safety", -1) # (1= full safety (stop upon contact), 0= full topple)
@@ -279,7 +276,7 @@ def main():
     )
 
     rospy.loginfo(f"[push] Preparing to push object '{object_name}'.")
-    
+
     rospy.sleep(0.5) # Let things settle for baseline collection
 
 
@@ -304,19 +301,37 @@ def main():
             m_est, zc_est, theta_star = data
 
 
-        return
-
         # *********************************************
         # ADAPTIVE SECOND PUSH DECISION BASED ON ESTIMATE
         if m_est is None or zc_est is None:
             rospy.logwarn("[push] No online estimate available, returning to initial pose.")
             prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=0)
-            est.disarm_logs()  # Ensure logging is stopped
             rospy.signal_shutdown("No estimate available after first push.")
+            return
         else:
             margin = 0.1 # 10% margin
             next_push_ht = choose_second_push(zc_est, margin=margin, obj_ht=height)
             rospy.loginfo(f"[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m")
+
+        # *********************************************
+        # WORKAROUND FOR STUPID F'IN robot that almost collides when asked to move down literally 3 centimeters
+        # find change in z in meters
+        delta_z = next_push_ht - pos[2]
+        # Use cartesian move to safely get close to this pose by calculating distance/time
+        safe_approach_speed = 0.01 # m/s
+        time_needed = abs(delta_z) / safe_approach_speed
+        
+        rospy.loginfo(f"[push] Approaching next push height with safe cartesian move of {delta_z:.4f} m over {time_needed:.2f} s")
+        success_approach = ctrl.cartesian_velocity(
+            v=[0, 0, np.sign(delta_z) * safe_approach_speed], # XYZ
+            w=[0, 0, 0],   # RPY
+            duration=time_needed,
+            force_watcher=None,
+            lock_orient=True,
+        )
+        if not check_manip_success(success_approach, "Safe approach to next push height"):
+            rospy.signal_shutdown("Safe approach to next push height failed.")
+            return
 
         # 5) Move to next pre-push height (with one retry)
         data = execute_push_sequence(
@@ -334,6 +349,8 @@ def main():
 
         # 7) Return to original pre-push pose
         prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=1)
+
+
     finally:
         rospy.sleep(0.5)
         est.disarm_logs()  # Ensure logging is stopped AFTER ALL MOTIONS

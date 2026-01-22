@@ -97,7 +97,9 @@ class FTClockLogger:
             base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
             stem = f"{base}_t{self.traj_idx:02d}"
 
-            # stem = f"{self.run_base}_t{self.traj_idx:03d}_SYNC"
+            rospy.set_param('/com_3d/current_log_stem', stem)
+            rospy.set_param('/com_3d/current_log_dir',  self.out_dir)
+            
             path = os.path.join(self.out_dir, stem + ".csv")
             self.video_path = os.path.join(self.out_dir, stem + ".mp4")
             

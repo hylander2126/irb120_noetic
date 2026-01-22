@@ -49,6 +49,7 @@ class LiveFitPlotter:
         # --- Track Multiple Estimates ---
         self.estimate_count = 0 # Counter of estimates in current trajectory
         self.fit_artists = []  # Store fit lines for multiple estimates
+        self.clear_artists_pending = False # Flag to clear old artists
         
         # --- Config ---
         self.update_hz = 10.0
@@ -68,6 +69,7 @@ class LiveFitPlotter:
         self.ln_fz, = self.ax_live.plot([], [], 'b-', label='Fz', alpha=0.6)
         self.ax_live.axhline(0.0, color='c', linewidth=1.0)
         self.ax_live.set_ylabel("Force (N)")
+        self.ax_live.set_xlabel("Time (s)")
         self.ax_live.set_title("Live Data Stream")
 
         # Create Twin Axis for Angle (since deg != Newtons)
@@ -83,15 +85,15 @@ class LiveFitPlotter:
         
 
         # --- SUBPLOT 2: POST-MORTEM RESULT (Bottom) ---
-        self.ax_res = self.axs[1]
-        self.ax_res.set_xlabel("Object Angle (deg)")
-        self.ax_res.set_ylabel("Torque (N-m)")
-        self.ax_res.grid(True)
-        self.ax_res.set_title("Latest Fit Result (Waiting...)")
+        self.ax_fit = self.axs[1]
+        self.ax_fit.set_xlabel("Object Angle (deg)")
+        self.ax_fit.set_ylabel("Torque (N-m)")
+        self.ax_fit.grid(True)
+        # self.ax_res.set_title("Latest Fit Result (Waiting...)")
 
         # Ground truth line (persistent)
-        self.ln_gt_th = self.ax_res.axvline(0, color='g', linestyle='--', linewidth=2, label='Ground Truth')
-        self.ax_res.axhline(0.0, color='c', linewidth=1.0)
+        self.ln_gt_th = self.ax_fit.axvline(0, color='g', linestyle='--', linewidth=2, label='Ground Truth')
+        self.ax_fit.axhline(0.0, color='c', linewidth=1.0)
 
         # Placeholders for result plot
         # self.sc_data = self.ax_res.scatter([], [], c='b', alpha=0.3, s=10, label='Measured Data')
@@ -110,9 +112,10 @@ class LiveFitPlotter:
 
     def _build_stem(self):
         """Match FTClockLogger naming convention exactly."""
-        object_name = rospy.get_param("/com_3d/object_name", "unknown")
-        base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
-        return f"{base}_t{self.traj_idx:02d}"
+        return rospy.get_param("/com_3d/current_log_stem", None)
+        # object_name = rospy.get_param("/com_3d/object_name", "unknown")
+        # base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
+        # return f"{base}_t{self.traj_idx:02d}"
 
     def _on_start(self, _):
         """Reset live plots when a new log starts."""
@@ -139,11 +142,17 @@ class LiveFitPlotter:
 
             # Reset estimate counter and clear old fit artists
             self.estimate_count = 0
-            for artist in self.fit_artists:
-                artist.remove()
-            self.fit_artists.clear()
+            self.clear_artists_pending = True
 
         rospy.loginfo("[Plotter] Log start detected - Cleared buffers and fit plots.")
+
+    def _clear_fit_artists(self):
+        """Called from main thread only - safe to manipulate matplotlib."""
+        for artist in self.fit_artists:
+            artist.remove()
+        self.fit_artists.clear()
+        self.ax_fit.relim()
+        self.ax_fit.autoscale_view()
 
     def _on_stop(self, _):
         with self.lock:
@@ -253,21 +262,21 @@ class LiveFitPlotter:
         alpha_line = 1.0 if est_num == 1 else 0.7
 
         # Add a new scatter plot for this estimate
-        sc = self.ax_res.scatter(
+        sc = self.ax_fit.scatter(
             data["th"], data["tau"], 
             c=color, alpha=alpha_scatter, s=10, 
             label='_' #f'Push {est_num} Data'
         )
 
         # Add a new fit line for this estimate
-        ln, = self.ax_res.plot(
+        ln, = self.ax_fit.plot(
             data["th"], data["fit"], 
             color=color, linestyle='--', linewidth=2, alpha=alpha_line,
             label=f'Push {est_num} Fit (m={data["m"]:.2f}kg, zc={data["z"]:.3f}m)'
         )
 
         # Add estimate theta* line
-        vl = self.ax_res.axvline(
+        vl = self.ax_fit.axvline(
             data["th_star"], 
             color=color, linestyle='-', linewidth=2, alpha=alpha_line,
             label=f'Push {est_num} θ*={data["th_star"]:.1f}°'
@@ -279,10 +288,10 @@ class LiveFitPlotter:
         self.ln_gt_th.set_xdata([gt_th_star_deg, gt_th_star_deg])
         self.ln_gt_th.set_label(f'GT $\\theta^*$ ({gt_th_star_deg:.1f}$^\\circ$)')
 
-        self.ax_res.set_title(f"Fit: m={data['m']:.2f}kg, zc={data['z']:.3f}m")
-        self.ax_res.legend(loc="upper right")
-        self.ax_res.relim()
-        self.ax_res.autoscale_view()
+        # self.ax_res.set_title(f"Fit: m={data['m']:.2f}kg, zc={data['z']:.3f}m")
+        self.ax_fit.legend(loc="upper right")
+        self.ax_fit.relim()
+        self.ax_fit.autoscale_view()
 
         # Save (paper-ready)
         if do_save:
@@ -302,6 +311,14 @@ class LiveFitPlotter:
 
     def run(self):
         while not rospy.is_shutdown():
+            # 0. Handle any pending artist clearing (main thread safe)
+            with self.lock:
+                should_clear = self.clear_artists_pending
+                self.clear_artists_pending = False
+
+            if should_clear:
+                self._clear_fit_artists()
+
             # 1. Update Live Plots
             with self.lock:
                 t_ft = list(self.live_t_ft)
