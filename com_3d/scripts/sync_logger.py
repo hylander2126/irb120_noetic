@@ -94,7 +94,7 @@ class FTClockLogger:
             # self.traj_idx += 1
             # Build a base name from datetime + object name
             object_name = rospy.get_param('/com_3d/object_name', 'unknown')
-            n_safety = round(rospy.get_param('/com_3d/n_safety', 0.0), 2)
+            n_safety = round(rospy.get_param('/com_3d/n_safety', 0.00), 3)
             base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
             stem = f"{base}_{n_safety}" # t{self.traj_idx:02d}"
 

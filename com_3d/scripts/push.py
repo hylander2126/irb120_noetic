@@ -240,11 +240,21 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
     return data  # m_est, zc_est, theta_star
 
 
+
+
+
+
+
+
+
+
+
 def main():
     rospy.init_node("push")
 
-    DURATION    = 26.0 # 12.0 secs # I halved the push speed, so have to double duration
-    PUSH_SPEED  = 0.005 # 0.01 m/s
+    DURATION    = 20.0 # 26.0 # 12.0 secs # I halved the push speed, so have to double duration
+    PUSH_SPEED  = 0.0075 # 0.005 # 0.01 m/s
+    SECOND_PUSH_SPEED = max(PUSH_SPEED/2, 0.005) # Slower second push for better resolution
     JOINT_TOL   = 2e-3 # rad
 
     n_SAFETY = rospy.get_param("~n_safety", -1) # (1= full safety (stop upon contact), 0= full topple)
@@ -316,25 +326,50 @@ def main():
             rospy.signal_shutdown("No estimate available after first push.")
             return
         
-        
         margin = 0.1 # 10% margin
         next_push_ht = choose_second_push(zc_est, margin=margin, obj_ht=height)
         rospy.loginfo(f"\n[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m\n")
-        input("[push] Press Enter to continue to second push...")
-        # *********************************************
 
-        # WORKAROUND FOR STUPID F'IN robot that almost collides when asked to move down literally 3 centimeters
+        # *********************************************
+        # CONFIRM WITH USER TO CONTINUE SECOND PUSH
+        user_in = input(f"[push] Continue to second push ({next_push_ht:.4f} m)? (y/n): ")
+        if user_in.lower() != 'y':
+            rospy.loginfo("[push] Second push aborted by user.")
+            prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=0)
+            rospy.signal_shutdown("Second push aborted by user.")
+            return
+        
+        # *********************************************
+        # 4) APPROACH next push height SAFELY
+        new_pos = [pos[0], pos[1], next_push_ht]
+
+        # WORKAROUND for nearly collides when asked to move down 3 centimeters
         # find change in z in meters
         delta_z = next_push_ht - pos[2]
         # Use cartesian move to safely get close to this pose by calculating distance/time
-        safe_approach_speed = 0.01 # m/s
-        time_needed = abs(delta_z) / safe_approach_speed
+        # time_needed = abs(delta_z) / PUSH_SPEED
+
+        # IF MONITOR, NEED ADDL RETRACT TO NOT COLLIDE, roughly -100mm in X (width of stand)
+        if object_name == "monitor":
+            new_pos[0] -= 0.100
+            # Now move backwards to get close to new X first.
+            safe_cart_move = ctrl.cartesian_velocity(
+                v=[-PUSH_SPEED, 0, 0], # XYZ
+                w=[0, 0, 0],   # RPY
+                duration= (abs(0.100) / PUSH_SPEED),
+                force_watcher=None,
+                lock_orient=True,
+                lock_z=True, # LOCK Z MOTION
+            )
+            if not check_manip_success(safe_cart_move, "Safe retract for monitor"):
+                rospy.signal_shutdown("Safe retract for monitor failed.")
+                return
         
-        rospy.loginfo(f"[push] Approaching next push height with safe cartesian move of {delta_z:.4f} m over {time_needed:.2f} s")
+        rospy.loginfo(f"[push] Approaching next push height with safe cartesian move of {delta_z:.4f} m.") # over {time_needed:.2f} s")
         success_approach = ctrl.cartesian_velocity(
-            v=[0, 0, np.sign(delta_z) * safe_approach_speed], # XYZ
+            v=[0, 0, np.sign(delta_z) * PUSH_SPEED], # XYZ
             w=[0, 0, 0],   # RPY
-            duration=time_needed,
+            duration=(abs(delta_z) / PUSH_SPEED),
             force_watcher=None,
             lock_orient=True,
             lock_z=False, # ALLOW Z MOTION
@@ -346,11 +381,11 @@ def main():
         # 5) Move to next pre-push height (with one retry)
         data = execute_push_sequence(
             ctrl=ctrl, 
-            pos=[pos[0], pos[1], next_push_ht], 
+            pos=new_pos, # [pos[0], pos[1], next_push_ht], 
             quat=quat, 
             fw=fw, 
             est=est, 
-            push_speed=PUSH_SPEED, 
+            push_speed=SECOND_PUSH_SPEED, # PUSH_SPEED, 
             duration=DURATION, 
             joint_tol=JOINT_TOL, 
             enable_logging=False, # STOP logging

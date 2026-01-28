@@ -237,7 +237,7 @@ class LiveFitPlotter:
         gt_th_star_deg = np.rad2deg(gt_th_star_rad)
 
         # Update title to reflect n_safety value for this run
-        n_safety = rospy.get_param("/com_3d/n_safety", 0.0)
+        n_safety = rospy.get_param("/com_3d/n_safety", 0.00)
         self.ax_live.set_title(f"Live Data Stream (n_safety={n_safety})")
 
         # Define colors for different estimates

@@ -1,0 +1,24 @@
+Batch Fit Results:
+  Push Phase:    m=0.214 kg, zc=0.108 m, th*=22.01 deg, MSE=0.0001
+  Retract Phase: m=0.201 kg, zc=0.010 m, th*=77.06 deg, MSE=0.0001
+  Weights: push=19949.1975, retract=13691.9866
+  COMBINED:      m=0.209 kg, zc=0.068 m, th*=32.66 deg
+
+Batch Fit Results:
+  Push Phase:    m=0.215 kg, zc=0.153 m, th*=15.89 deg, MSE=0.0001
+  Retract Phase: m=0.202 kg, zc=0.010 m, th*=77.06 deg, MSE=0.0001
+  Weights: push=16713.4892, retract=11018.8095
+  COMBINED:      m=0.210 kg, zc=0.096 m, th*=24.37 deg
+
+Batch Fit Results:
+  Push Phase:    m=0.214 kg, zc=0.126 m, th*=19.09 deg, MSE=0.0000
+  Retract Phase: m=0.201 kg, zc=0.048 m, th*=42.47 deg, MSE=0.0001
+  Weights: push=23422.6425, retract=16883.9221
+  COMBINED:      m=0.209 kg, zc=0.093 m, th*=25.08 deg
+
+Batch Fit Results:
+  Push Phase:    m=0.192 kg, zc=0.126 m, th*=19.08 deg, MSE=0.0001
+  Retract Phase: m=0.196 kg, zc=0.077 m, th*=29.37 deg, MSE=0.0001
+  Weights: push=9693.3425, retract=9710.1668
+  COMBINED:      m=0.194 kg, zc=0.102 m, th*=23.19 deg
+
