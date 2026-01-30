@@ -50,21 +50,25 @@ class LiveFitPlotter:
         self.update_hz = 10.0
         self.dt_wall = 1.0 / self.update_hz
 
+        # --- Timing for live plot ---
+        self.t_offset = 0.0             # total accum 'active' time
+        self.t_seg_start_wall = None    # wall start time for current active segment
+        self.has_started_once = False
+
         # --- Matplotlib Setup ---
         plt.ion()
         
-        # Create 2 vertical subplots
-        self.fig, self.axs = plt.subplots(2, 1, figsize=(8, 8))
-        self.fig.canvas.manager.set_window_title("Center of Mass Estimator - Live")
+        # Create live plot
+        self.fig_live, self.ax_live = plt.subplots(1, 1, figsize=(8, 4.5))
+        self.fig_live.canvas.manager.set_window_title("CoM Estimator - Live")
         
-        # --- SUBPLOT 1: LIVE SENSORS (Top) ---
-        self.ax_live = self.axs[0]
+        # --- LIVE SENSORS PLOT ---
         self.ln_fx, = self.ax_live.plot([], [], 'r-', label='Fx', alpha=0.6)
         self.ln_fy, = self.ax_live.plot([], [], 'g-', label='Fy', alpha=0.6)
         self.ln_fz, = self.ax_live.plot([], [], 'b-', label='Fz', alpha=0.6)
         self.ax_live.axhline(0.0, color='c', linewidth=1.0)
         self.ax_live.set_ylabel("Force (N)")
-        self.ax_live.set_xlabel("Time (s)")
+        self.ax_live.set_xlabel("Time (s) (gap-compressed)")
         self.ax_live.set_title("Live Data Stream")
 
         # Create Twin Axis for Angle (since deg != Newtons)
@@ -78,10 +82,13 @@ class LiveFitPlotter:
         self.ax_live.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
         self.ax_live.grid(True)
         
-        # --- SUBPLOT 2: POST-MORTEM RESULT (Bottom) ---
-        self.ax_fit = self.axs[1]
-        self.ax_fit.set_xlabel("Object Angle (deg)")
-        self.ax_fit.set_ylabel("Torque (N-m)")
+        # --- Fit Plot ---
+        self.fig_fit, self.ax_fit = plt.subplots(1, 1, figsize=(8, 4.5))
+        self.fig_fit.canvas.manager.set_window_title("CoM Estimator - Fit Results")
+
+        self.ax_fit.set_xlabel("Object Angle (deg)", fontsize=16)
+        self.ax_fit.tick_params(axis='both', labelsize=14)
+        self.ax_fit.set_ylabel("Torque (N-m)", fontsize=16)
         self.ax_fit.grid(True)
         # self.ax_res.set_title("Latest Fit Result (Waiting...)")
 
@@ -107,28 +114,36 @@ class LiveFitPlotter:
         """Reset live plots when a new log starts."""
         with self.lock:
             self._build_stem()
-            self.t_start = rospy.get_time()
-            self.live_t_ft = []
-            self.live_f = []
-            self.live_t_tag = []
-            self.live_th = []
-            
-            # Reset reference orientation
-            if self.last_tag_q is not None:
-                self.q_ref = self.last_tag_q
-            else:
-                self.q_ref = None 
 
-            # Clear any pending result from a previous run
+            now = rospy.get_time()
+
+            # If brand new run, clear buffers, else accumulate time offset
+            if not self.has_started_once:
+                self.live_t_ft, self.live_f = [], []
+                self.live_t_tag, self.live_th = [], []
+                self.t_offset = 0.0
+                self.estimate_count = 0
+                self.clear_artists_pending = True
+                self.has_started_once = True
+                
+                # Reset reference orientation
+                if self.last_tag_q is not None:
+                    self.q_ref = self.last_tag_q
+                else:
+                    self.q_ref = None 
+
+                # Unused currently:
+                # self.t_start = now
+                rospy.loginfo("[Plotter] Log start detected - Cleared buffers and fit plots.")
+            else:
+                rospy.loginfo("[Plotter] Log restart detected - Resuming live buffers.")
+
+            # else
+            # Resume segmented timing
+            self.t_seg_start_wall = now
             self.is_live = True
             self.pending_result = None
             self.save_pending = False
-
-            # Reset estimate counter and clear old fit artists
-            self.estimate_count = 0
-            self.clear_artists_pending = True
-
-        rospy.loginfo("[Plotter] Log start detected - Cleared buffers and fit plots.")
 
     def _clear_fit_artists(self):
         """Called from main thread only - safe to manipulate matplotlib."""
@@ -137,17 +152,28 @@ class LiveFitPlotter:
         self.fit_artists.clear()
         self.ax_fit.relim()
         self.ax_fit.autoscale_view()
-
+    
     def _on_stop(self, _):
         with self.lock:
+            if self.is_live and self.t_seg_start_wall is not None:
+                self.t_offset += rospy.get_time() - self.t_seg_start_wall
+            
             self.is_live = False
+            self.t_seg_start_wall = None
         rospy.loginfo("[Plotter] Log stop detected - Freezing live buffers.")
+    
+    def _now_plot_time(self):
+        now = rospy.get_time()
+        if self.t_seg_start_wall is None:
+            return self.t_offset
+        return self.t_offset + (now - self.t_seg_start_wall)
 
     def _on_ft(self, msg):
         with self.lock:
-            if not self.is_live or self.t_start is None:
+            if not self.is_live: # or self.t_start is None:
                 return
-            t = rospy.get_time() - self.t_start
+            # t = rospy.get_time() - self.t_start
+            t = self._now_plot_time()
             f = [msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z]
             self.live_t_ft.append(t)
             self.live_f.append(f)
@@ -160,7 +186,7 @@ class LiveFitPlotter:
         self.last_tag_q = q_arr
 
         with self.lock:
-            if not self.is_live or self.t_start is None:
+            if not self.is_live: # or self.t_start is None:
                 return
 
             if self.q_ref is None:
@@ -172,7 +198,8 @@ class LiveFitPlotter:
             rv = quat_to_rotvec(q_rel, normalize=False)
             angle_rad = np.linalg.norm(rv)
 
-            t = rospy.get_time() - self.t_start
+            # t = rospy.get_time() - self.t_start
+            t = self._now_plot_time()
             self.live_t_tag.append(t)
             self.live_th.append(np.rad2deg(angle_rad))
 
@@ -252,57 +279,48 @@ class LiveFitPlotter:
         n_safety = rospy.get_param("/com_3d/n_safety", 0.00)
         self.ax_live.set_title(f"Live Data Stream (n_safety={n_safety})")
 
-        # Define colors for different estimates
-        colors = ['blue', 'orange', 'purple']
-        color_idx = (est_num - 1) % len(colors)
-        color = colors[color_idx]
-        # Create label with estimate number
-        alpha_scatter = 0.5 if est_num == 1 else 0.3
-        alpha_line = 1.0 if est_num == 1 else 0.7
-
+        # Define colors and labels for different estimates
+        c_idx = (est_num - 1) # Alternate colors for each estimate
+        colors = ['tab:blue', 'tab:orange'][c_idx]
+        labels = ["Push Fit", "Retract Fit"] if c_idx==0 else ['_', '_']
+        markers = ['o', 'd']
+        alpha_push = [0.70, 0.95] # scatter, line
+        alpha_retr = [0.70, 0.70] # scatter, line
+        lp = ['-', '--'][c_idx] # Est 1 is Solid, Est 2 is Dashed
+        # lr = [':', '-.'][c_idx] # Est 1 is Dotted, Est 2 is Dash-Dot
+        lr = lp
+        
         # Add a new scatter plot for this estimate
         # --- Push (solid dots + dashed line) ---
-        sc_p = self.ax_fit.scatter(
-            data["th_p"], data["tau_p"],
-            c=color, alpha=alpha_scatter, s=10,
-            label="_"
-        )
-
-        ln_p, = self.ax_fit.plot(
-            data["th_p"], data["fit_p"],
-            color=color, linestyle="--", linewidth=2, alpha=alpha_line,
-            label=f'Push {est_num} Fit'
-        )
+        scatter_push = self.ax_fit.scatter(data["th_p"], data["tau_p"],
+            c=colors, alpha=alpha_push[0], s=30, label="_", marker=markers[0])
+        
+        fit_push, = self.ax_fit.plot(data["th_p"], data["fit_p"],
+            color='black', linestyle=lp, linewidth=2, alpha=alpha_push[1],
+            label=labels[0])
 
         # --- Retract (lighter dots + dotted line) ---
-        sc_r = self.ax_fit.scatter(
-            data["th_r"], data["tau_r"],
-            c=color, alpha=max(0.15, alpha_scatter * 0.6), s=10,
-            label="_"
-        )
+        scatter_retr = self.ax_fit.scatter(data["th_r"], data["tau_r"],
+            c=colors, alpha=alpha_retr[0], s=30, label="_", marker=markers[1])
 
-        ln_r, = self.ax_fit.plot(
-            data["th_r"], data["fit_r"],
-            color=color, linestyle=":", linewidth=2, alpha=max(0.5, alpha_line * 0.8),
-            label=f'Retract {est_num} Fit'
-        )
+        fit_retr, = self.ax_fit.plot(data["th_r"], data["fit_r"],
+            color='black', linestyle=lr, linewidth=2, alpha=alpha_retr[1], # max(0.5, alpha_line * 0.8),
+            label=labels[1])
 
-        # theta* line (combined estimate)
-        vl = self.ax_fit.axvline(
-            data["th_star"],
-            color=color, linestyle='-', linewidth=2, alpha=alpha_line,
-            label=f'Est {est_num} θ*={data["th_star"]:.1f}°, m={data["m"]:.2f}kg, z={data["z"]:.3f}m'
-        )
+        # --- theta* line (combined estimate) ---
+        vl = self.ax_fit.axvline(data["th_star"],
+            color=colors, linestyle='-', linewidth=2, alpha=0.9,
+            label=f'Est {est_num} θ*={data["th_star"]:.1f}°, m={data["m"]:.2f}kg, z={data["z"]:.3f}m')
 
         # Store artists for potential removal later
-        self.fit_artists.extend([sc_p, ln_p, sc_r, ln_r, vl])
+        self.fit_artists.extend([scatter_push, fit_push, scatter_retr, fit_retr, vl])
 
         # Update GT line
         self.ln_gt_th.set_xdata([gt_th_star_deg, gt_th_star_deg])
         self.ln_gt_th.set_label(f'GT $\\theta^*$ ({gt_th_star_deg:.1f}$^\\circ$)')
 
         # self.ax_res.set_title(f"Fit: m={data['m']:.2f}kg, zc={data['z']:.3f}m")
-        self.ax_fit.legend(loc="upper right")
+        self.ax_fit.legend(loc="upper right", fontsize=10)
         self.ax_fit.relim()
         self.ax_fit.autoscale_view()
 
@@ -313,15 +331,20 @@ class LiveFitPlotter:
                     self._build_stem() # Try again in case it wasn't set in sync_logger yet
                 except:
                     pass
-            png_path = os.path.join(self.out_dir, self.log_stem + "_fit_plot.png")
+            fit_png_path = os.path.join(self.out_dir, self.log_stem + "_fit_plot.png")
+            live_png_path = os.path.join(self.out_dir, self.log_stem + "_live_plot.png")
 
             try:
-                # Render first
-                self.fig.canvas.draw_idle()
-                self.fig.canvas.flush_events()
-
-                self.fig.savefig(png_path, dpi=300, bbox_inches="tight") # TIGHT LAYOUT looks good but title overlaps...
-                rospy.loginfo("[Plotter] Saved: %s", png_path)
+                # Render fit first
+                self.fig_fit.canvas.draw_idle()
+                self.fig_fit.canvas.flush_events()
+                self.fig_fit.savefig(fit_png_path, dpi=300, bbox_inches="tight")
+                rospy.loginfo("[Plotter] Saved: %s", fit_png_path)
+                # Render live plot
+                self.fig_live.canvas.draw_idle()
+                self.fig_live.canvas.flush_events()
+                self.fig_live.savefig(live_png_path, dpi=300, bbox_inches="tight")
+                rospy.loginfo("[Plotter] Saved: %s", live_png_path)
             except Exception as e:
                 rospy.logwarn("[Plotter] Save failed: %s", str(e))
         # We don't draw here; the main loop handles drawing to keep GUI responsive
@@ -339,9 +362,9 @@ class LiveFitPlotter:
 
             # 1. Update Live Plots
             with self.lock:
-                t_ft = list(self.live_t_ft)
+                t_ft = list(self.live_t_ft) # raw time with gaps (pure stream)
                 f_data = np.array(self.live_f) if self.live_f else np.empty((0,3))
-                t_tag = list(self.live_t_tag)
+                t_tag = list(self.live_t_tag) # raw time with gaps
                 th_data = list(self.live_th)
 
             if len(t_ft) > 1 and len(f_data) == len(t_ft):
@@ -359,8 +382,10 @@ class LiveFitPlotter:
             # 2. Check for and Update Result Plot (Main Thread)
             self._update_result_plot_and_save()
             
-            self.fig.canvas.draw_idle()
-            self.fig.canvas.flush_events()
+            self.fig_live.canvas.draw_idle()
+            self.fig_fit.canvas.draw_idle()
+            self.fig_live.canvas.flush_events()
+            self.fig_fit.canvas.flush_events()
             plt.pause(self.dt_wall)
 
 if __name__ == "__main__":

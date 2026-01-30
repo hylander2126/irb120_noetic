@@ -129,7 +129,7 @@ class EstimateListener:
                 m_est, zc_est, theta_star = out
                 rospy.loginfo(f"[push] ===============================================================")
                 rospy.loginfo(f"[push] RECEIVED ESTIMATE: m={m_est:.3f} kg, zc={zc_est:.3f} m, theta*={np.degrees(theta_star):.2f} deg")
-                rospy.loginfo(f"[push] error (unknown to estimator): m={m_est - self.gt_mass:.3f} kg, zc={zc_est - self.gt_com[2]:.3f} m, theta*={np.degrees(theta_star - self.gt_thst):.2f} deg")
+                rospy.loginfo(f"[push] Error: m={m_est - self.gt_mass:.3f} kg, zc={zc_est - self.gt_com[2]:.3f} m, theta*={np.degrees(theta_star - self.gt_thst):.2f} deg")
                 rospy.loginfo(f"[push] ===============================================================")
                 return out
             
@@ -192,46 +192,44 @@ def prepush_procedure(controller, position, quaternion, joint_tol, retries=0):
     return True
 
 
-def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_tol, enable_logging, retries):
+def execute_push_sequence(controller, position, quaternion, forcewatcher, estimator, push_speed, duration, joint_tol, retries):
     """
     Execute complete push sequence: prep -> push -> retract.
-    
-    Args:
-        enable_logging: If True, start/stop logging around this push sequence
     """
     # 1) Pre-push procedure (move to pose, reset fw, clear est, arm est, and enable logging if needed)
-    success_prepush = prepush_procedure(ctrl, pos, quat, joint_tol, retries)
+    success_prepush = prepush_procedure(controller, position, quaternion, joint_tol, retries)
     if not success_prepush:
         return None
     
-    fw.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
-    fw.is_active = True
-    est.clear()  # Clear any old estimates
+    forcewatcher.reset()  # Reset static variables in ForceWatcher (Backstop to prevent booleans sticking)
+    forcewatcher.is_active = True
+    estimator.clear()  # Clear any old estimates
 
     rospy.sleep(1.0) # Sleep to allow baseline collection and settling
-    est.arm_estimate()  # Start estimator (start acccumulating)
-    est.arm_logs() if enable_logging else None  # Start logging if needed
+    estimator.arm_logs()  # Arm logging for this push sequence
+    estimator.arm_estimate()  # Start estimator (start acccumulating)
 
-    success_push = ctrl.cartesian_velocity(
+    # 2) Execute push
+    success_push = controller.cartesian_velocity(
         v=[push_speed, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
         duration=duration,
-        force_watcher=fw,
-        lock_orient=True,
+        force_watcher=forcewatcher,
     )
     if not check_manip_success(success_push, "Push"):
         return None
 
-    success_retract = ctrl.cartesian_velocity(
+    # 3) Retract
+    success_retract = controller.cartesian_velocity(
         v=[-push_speed, 0, 0], # XYZ
         w=[0, 0, 0],   # RPY
-        duration=ctrl.last_cartesian_duration, # returns ~same distance buffer to be safe
+        duration=controller.last_cartesian_duration, # returns ~same distance buffer to be safe
         force_watcher=None, # No force watcher on retract
-        lock_orient=True,
     )
-    fw.is_active = False
-    est.disarm_estimate()  # Stop estimator
-    data = est.wait_for_new_estimate(timeout=3.0) # Returns None, None, None if no estimate available
+    forcewatcher.is_active = False
+    estimator.disarm_estimate()  # Stop estimator
+    data = estimator.wait_for_new_estimate(timeout=3.0) # Returns None, None, None if no estimate available
+    estimator.disarm_logs()  # Disarm logging for this push sequence
     
     # Check for success AFTER disarming everything to ensure clean state
     if not check_manip_success(success_retract, "Retraction"):
@@ -245,16 +243,12 @@ def execute_push_sequence(ctrl, pos, quat, fw, est, push_speed, duration, joint_
 
 
 
-
-
-
-
 def main():
     rospy.init_node("push")
 
     DURATION    = 20.0 # 26.0 # 12.0 secs # I halved the push speed, so have to double duration
-    PUSH_SPEED  = 0.0075 # 0.005 # 0.01 m/s
-    SECOND_PUSH_SPEED = max(PUSH_SPEED/2, 0.005) # Slower second push for better resolution
+    SLOW_SPEED  = 0.0075 # 0.005 # 0.01 m/s
+    SLOWEST_SPEED = max(SLOW_SPEED/2, 0.005) # Slower second push for better resolution
     JOINT_TOL   = 2e-3 # rad
 
     n_SAFETY = rospy.get_param("~n_safety", -1) # (1= full safety (stop upon contact), 0= full topple)
@@ -300,15 +294,10 @@ def main():
     try:
         ## =================== BEGIN MOTION SEQUENCE ===================== 
         data = execute_push_sequence(
-            ctrl=ctrl, 
-            pos=pos, 
-            quat=quat, 
-            fw=fw, 
-            est=est, 
-            push_speed=PUSH_SPEED, 
+            ctrl, pos, quat, fw, est, 
+            push_speed=SLOW_SPEED, 
             duration=DURATION, 
             joint_tol=JOINT_TOL, 
-            enable_logging=True, # START logging
             retries=0 # No retries for first push (fail fast if pose unreachable)
         )
         if data is None:
@@ -316,7 +305,6 @@ def main():
             return
         else:
             m_est, zc_est, theta_star = data
-
 
         # *********************************************
         # ADAPTIVE SECOND PUSH DECISION BASED ON ESTIMATE
@@ -338,40 +326,39 @@ def main():
             prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=0)
             rospy.signal_shutdown("Second push aborted by user.")
             return
-        
+
+
         # *********************************************
         # 4) APPROACH next push height SAFELY
         new_pos = [pos[0], pos[1], next_push_ht]
 
-        # WORKAROUND for nearly collides when asked to move down 3 centimeters
-        # find change in z in meters
-        delta_z = next_push_ht - pos[2]
-        # Use cartesian move to safely get close to this pose by calculating distance/time
-        # time_needed = abs(delta_z) / PUSH_SPEED
-
+        ## ===== MONITOR SPECIAL CASE =====
         # IF MONITOR, NEED ADDL RETRACT TO NOT COLLIDE, roughly -100mm in X (width of stand)
         if object_name == "monitor":
-            new_pos[0] -= 0.100
+            retract_distance_abs_m = 0.100 # 100mm
+            new_pos[0] -= retract_distance_abs_m
             # Now move backwards to get close to new X first.
             safe_cart_move = ctrl.cartesian_velocity(
-                v=[-PUSH_SPEED, 0, 0], # XYZ
+                v=[-SLOW_SPEED, 0, 0], # XYZ
                 w=[0, 0, 0],   # RPY
-                duration= (abs(0.100) / PUSH_SPEED),
+                duration= (abs(retract_distance_abs_m) / SLOW_SPEED),
                 force_watcher=None,
-                lock_orient=True,
                 lock_z=True, # LOCK Z MOTION
             )
             if not check_manip_success(safe_cart_move, "Safe retract for monitor"):
                 rospy.signal_shutdown("Safe retract for monitor failed.")
                 return
+        ## ================================
         
-        rospy.loginfo(f"[push] Approaching next push height with safe cartesian move of {delta_z:.4f} m.") # over {time_needed:.2f} s")
+        # Safe Cartesian approach using duration based on SLOW_SPEED and distance
+        delta_z = next_push_ht - pos[2]
+        rospy.loginfo(f"[push] Approaching next push height with safe cartesian move of {delta_z:.4f} m.")
+
         success_approach = ctrl.cartesian_velocity(
-            v=[0, 0, np.sign(delta_z) * PUSH_SPEED], # XYZ
+            v=[0, 0, np.sign(delta_z) * SLOW_SPEED], # XYZ
             w=[0, 0, 0],   # RPY
-            duration=(abs(delta_z) / PUSH_SPEED),
+            duration=(abs(delta_z) / SLOW_SPEED)*0.9, # SLIGHLTY SHORTER TO NOT OVERSHOOT
             force_watcher=None,
-            lock_orient=True,
             lock_z=False, # ALLOW Z MOTION
         )
         if not check_manip_success(success_approach, "Safe approach to next push height"):
@@ -380,15 +367,10 @@ def main():
 
         # 5) Move to next pre-push height (with one retry)
         data = execute_push_sequence(
-            ctrl=ctrl, 
-            pos=new_pos, # [pos[0], pos[1], next_push_ht], 
-            quat=quat, 
-            fw=fw, 
-            est=est, 
-            push_speed=SECOND_PUSH_SPEED, # PUSH_SPEED, 
+            ctrl, new_pos, quat, fw, est, # NEW_POS = [pos[0], pos[1], next_push_ht], 
+            push_speed=SLOWEST_SPEED, # PUSH_SPEED, 
             duration=DURATION, 
             joint_tol=JOINT_TOL, 
-            enable_logging=False, # STOP logging
             retries=1 # One retry for second push to allow for minor corrections
         )
 

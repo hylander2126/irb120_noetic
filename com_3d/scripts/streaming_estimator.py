@@ -118,8 +118,8 @@ class BatchEstimator:
         m_est, zc_est = map(float, popt)
 
         # Residual score for weighting
-        tau_fit = _fit_target(th_in, m_est, zc_est).reshape(-1)
-        resid_nl = (tau_in - tau_fit).reshape(-1)
+        tau_fit_vec = _fit_target(th_in, m_est, zc_est).reshape(-1, 3)  # (Ni,3)
+        resid_nl = (tau_in - tau_fit_vec).reshape(-1)                   # (Ni*3,) raveled
         # mean squared residual per element
         mse = float(np.mean(resid_nl**2))
 
@@ -169,8 +169,9 @@ class BatchEstimator:
             rot_vecs.append(rv)
         
         rot_vecs = np.array(rot_vecs)
-        rot_vecs_filt = filtfilt(self.b, self.a, rot_vecs, axis=0) # low-pass filter rot vec TODO maybe calculate e_hat here?
-        theta_exp = np.linalg.norm(rot_vecs_filt, axis=1) # TODO: test filtering on scalar theta instead
+        # rot_vecs_filt = filtfilt(self.b, self.a, rot_vecs, axis=0) # low-pass filter rot vec TODO maybe calculate e_hat here?
+        # theta_exp = np.linalg.norm(rot_vecs_filt, axis=1) # deprecated: filter after norm (below)
+        theta_exp = filtfilt(self.b, self.a, np.linalg.norm(rot_vecs, axis=1)) # low-pass filter theta scalar
 
         # -----------------------------------------------------------
         # 2. MASKING for CONTACT and RETRACT DATA
@@ -259,7 +260,14 @@ class BatchEstimator:
             fit_r = (tau_model(th_r, fit_retr["m"], fit_retr["zc"], rc0_known=self.rc0, e_hat=self.e_hat).reshape(-1, 3) @ self.e_hat) # (Nr,)
 
             # Optional downsample to keep messages small
-            # TODO: implement this
+            def _downsample(th, tau, fit, max_pts=120):
+                if len(th) <= max_pts:
+                    return th, tau, fit
+                step = max(1, len(th) // max_pts)
+                return th[::step], tau[::step], fit[::step]
+            
+            th_p, tau_p, fit_p = _downsample(th_p, tau_p, fit_p, max_pts=60)
+            th_r, tau_r, fit_r = _downsample(th_r, tau_r, fit_r, max_pts=60)
 
             plot_object = {
                 "Np": len(th_p),

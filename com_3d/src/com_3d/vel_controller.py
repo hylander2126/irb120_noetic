@@ -67,18 +67,15 @@ class VelocityController:
         urdf_param          = "robot_description",
         joint_state_topic   = "/egm/joint_states",
         vel_cmd_topic       = "/egm/joint_group_velocity_controller/command",
-        rate_hz             = 100.0,
         max_joint_vel       = 1.57,   # 0.5*pi rad/s safety clamp
-        joint_safety_margin = 0.05,   # rad away from hard limits
-        floor_z_margin      = 0.06,   # Lowest the fingertip should be allowed to go
     ):
         self.base_link           = base_link
         self.tip_link            = tip_link
-        self.rate_hz             = float(rate_hz)
+        self.rate_hz             = float(100.0)
         self.dt                  = 1.0 / self.rate_hz
         self.max_joint_vel       = float(max_joint_vel)
-        self.joint_safety_margin = float(joint_safety_margin)
-        self.floor_z_margin      = float(floor_z_margin)
+        self.joint_safety_margin = float(0.05) # rad - angle away from hard limits
+        self.floor_z_margin      = float(0.06) # meters - Lowest the fingertip should be allowed to go
 
         # FK state tracking
         self.ee_max_age                 = 0.1 # 100 ms --> used to be 0.02 # 20 ms but too strict
@@ -93,6 +90,9 @@ class VelocityController:
         # Cartesian gains
         self.kp_orient = 1.0  # [rad/s per rad error]
         self.kp_zlock  = 1.0  # [m/s per m error]
+        self.kd_zlock  = 0.2  # [m/s per m/s error]
+        self._vz_filt  = 0.00 # low-pass filter for vz corrections
+        self._z_prev   = None # for vz derivative
 
 
         # 1) Parse URDF and build KDL chain
@@ -463,10 +463,23 @@ class VelocityController:
             v_cmd, w_cmd = v.copy(), w.copy()
 
             # FIRST build the linear component of the twist command (with z lock if enabled)
+
+            # Clamp and low-pass filter vz corrections (AND NOW DERIVATIVE)
             if lock_z:
-                vz_corr = self.kp_zlock * (z_des - xyz_curr[2]) # simple P control on Z
-                # vz_corr = np.clip(vz_corr, -0.05, 0.05) # OPTIONAL clamp
-                v_cmd[2] += vz_corr
+                z_curr = xyz_curr[2]
+                # Deriv computation
+                if self._z_prev is None:
+                    z_dot = 0.0
+                else:
+                    z_dot = (z_curr - self._z_prev) / self.dt
+                self._z_prev = z_curr
+                # P and D control
+                vz_raw = (self.kp_zlock * (z_des-z_curr)) - (self.kd_zlock * z_dot)  # simple PD control on Z
+                vz_raw = np.clip(vz_raw, -0.004, 0.004)  # Clamp to avoid spikes
+                # alpha = 0.2 # low-pass filter (alpha ~ 0.1-0.3)
+                # self._vz_filt = (1-alpha)*self._vz_filt + alpha*vz_raw
+                # v_cmd[2] += self._vz_filt
+                v_cmd[2] += vz_raw
 
             # SECOND determine angular component (w_cmd)
             if lock_orient: # ONLY runs if w_des was zero
