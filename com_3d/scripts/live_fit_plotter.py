@@ -179,39 +179,51 @@ class LiveFitPlotter:
     def _on_fit_result(self, msg):
         """
         Triggered when Estimator publishes final batch result.
-        Msg format assumed: [N, t[N], th[N], tau[N], fit[N], th_star_est, m, z]
+        Msg format:
+         [Np, Nr,
+         th_p[Np], tau_p[Np], fit_p[Np],
+         th_r[Nr], tau_r[Nr], fit_r[Nr],
+         th_star_est, m, z]
+        All th_* are in RADIANS coming from estimator.
+        tau_* and fit_* are scalar projected torque (N-m).
         """
         rospy.loginfo("[Plotter] Received Fit Result! Updating Plot...")
         
         d = np.array(msg.data, dtype=float)
-        if d.size < 4: return
-
-        N = int(d[0])
+        if d.size < 5: return
         
         # Slice Data safely
         try:
-            idx = 1
-            # t_arr = d[idx:idx+N]; idx += N # Unused
-            idx += N 
-            th_arr = d[idx:idx+N]; idx += N
-            tau_arr = d[idx:idx+N]; idx += N
-            fit_arr = d[idx:idx+N]; idx += N
-            
+            idx = 0
+            Np = int(d[idx]); idx += 1
+            Nr = int(d[idx]); idx += 1
+
+            th_p = d[idx:idx+Np]; idx += Np
+            tau_p = d[idx:idx+Np]; idx += Np
+            fit_p = d[idx:idx+Np]; idx += Np
+
+            th_r = d[idx:idx+Nr]; idx += Nr
+            tau_r = d[idx:idx+Nr]; idx += Nr
+            fit_r = d[idx:idx+Nr]; idx += Nr
+
             th_star_est = float(d[idx]); idx += 1
             m_est = float(d[idx]); idx += 1
             z_est = float(d[idx]); idx += 1
-        except IndexError:
-            rospy.logerr(f"[Plotter] Data array too short! Got len={len(d)}, expected > {4*N}")
+        except Exception as e:
+            rospy.logerr(f"[Plotter] Failed to parse fit payload: {e}. len={len(d)}")
             return
         
         # Save parsed data to shared variable
         payload = {
-            "th": np.rad2deg(th_arr),
-            "tau": tau_arr,
-            "fit": fit_arr,
+            "th_p": np.rad2deg(th_p),
+            "tau_p": tau_p,
+            "fit_p": fit_p,
+            "th_r": np.rad2deg(th_r),
+            "tau_r": tau_r,
+            "fit_r": fit_r,
             "th_star": np.rad2deg(th_star_est),
             "m": m_est,
-            "z": z_est
+            "z": z_est,
         }
         with self.lock:
             self.pending_result = payload
@@ -249,27 +261,41 @@ class LiveFitPlotter:
         alpha_line = 1.0 if est_num == 1 else 0.7
 
         # Add a new scatter plot for this estimate
-        sc = self.ax_fit.scatter(
-            data["th"], data["tau"], 
-            c=color, alpha=alpha_scatter, s=10, 
-            label='_' #f'Push {est_num} Data'
+        # --- Push (solid dots + dashed line) ---
+        sc_p = self.ax_fit.scatter(
+            data["th_p"], data["tau_p"],
+            c=color, alpha=alpha_scatter, s=10,
+            label="_"
         )
 
-        # Add a new fit line for this estimate
-        ln, = self.ax_fit.plot(
-            data["th"], data["fit"], 
-            color=color, linestyle='--', linewidth=2, alpha=alpha_line,
-            label=f'Push {est_num} Fit (m={data["m"]:.2f}kg, zc={data["z"]:.3f}m)'
+        ln_p, = self.ax_fit.plot(
+            data["th_p"], data["fit_p"],
+            color=color, linestyle="--", linewidth=2, alpha=alpha_line,
+            label=f'Push {est_num} Fit'
         )
 
-        # Add estimate theta* line
+        # --- Retract (lighter dots + dotted line) ---
+        sc_r = self.ax_fit.scatter(
+            data["th_r"], data["tau_r"],
+            c=color, alpha=max(0.15, alpha_scatter * 0.6), s=10,
+            label="_"
+        )
+
+        ln_r, = self.ax_fit.plot(
+            data["th_r"], data["fit_r"],
+            color=color, linestyle=":", linewidth=2, alpha=max(0.5, alpha_line * 0.8),
+            label=f'Retract {est_num} Fit'
+        )
+
+        # theta* line (combined estimate)
         vl = self.ax_fit.axvline(
-            data["th_star"], 
+            data["th_star"],
             color=color, linestyle='-', linewidth=2, alpha=alpha_line,
-            label=f'Push {est_num} θ*={data["th_star"]:.1f}°'
+            label=f'Est {est_num} θ*={data["th_star"]:.1f}°, m={data["m"]:.2f}kg, z={data["z"]:.3f}m'
         )
+
         # Store artists for potential removal later
-        self.fit_artists.extend([sc, ln, vl])
+        self.fit_artists.extend([sc_p, ln_p, sc_r, ln_r, vl])
 
         # Update GT line
         self.ln_gt_th.set_xdata([gt_th_star_deg, gt_th_star_deg])
