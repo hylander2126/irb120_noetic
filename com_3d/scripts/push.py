@@ -69,7 +69,7 @@ OBJECT_MOTIONS = {
     },
 
     "flashlight": {
-        "prep_xyz": [0.5667, 0.0, 0.1734], #0.1534], # Corresponds to prep_q below
+        "prep_xyz": [0.590, 0.0, 0.1734], #0.5667, 0, 0.1534], # Corresponds to prep_q below
         "prep_quat": HOME_QUAT,
         # "prep_q": [0, 0.978, 0.566, 0, -1.544, 0], # manual prep joint config
 
@@ -314,7 +314,7 @@ def main():
             rospy.signal_shutdown("No estimate available after first push.")
             return
         
-        margin = 0.1 # 10% margin
+        margin = 0.10 # 10% margin
         next_push_ht = choose_second_push(zc_est, margin=margin, obj_ht=height)
         rospy.loginfo(f"\n[push] Next push height selected at zc + {100*margin}% margin: {next_push_ht:.4f} m\n")
 

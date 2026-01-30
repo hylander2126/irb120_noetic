@@ -280,8 +280,9 @@ class LiveFitPlotter:
         self.ax_live.set_title(f"Live Data Stream (n_safety={n_safety})")
 
         # Define colors and labels for different estimates
-        c_idx = (est_num - 1) # Alternate colors for each estimate
-        colors = ['tab:blue', 'tab:orange'][c_idx]
+        cc = ['tab:blue', 'tab:orange']
+        c_idx = (est_num - 1) % len(cc) # Alternate colors for each estimate
+        colors = cc[c_idx]
         labels = ["Push Fit", "Retract Fit"] if c_idx==0 else ['_', '_']
         markers = ['o', 'd']
         alpha_push = [0.70, 0.95] # scatter, line

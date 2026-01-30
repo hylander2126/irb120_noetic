@@ -22,7 +22,7 @@ class ForceWatcher:
         ):
         self.n_safety = n_safety
         self.debug = debug
-        self.F_STOP_SAFETY = 9.0 # N absolute max stop (regardless of n_safety and peak) FINGER IS CAUGHT ON SOMETHING....
+        self.F_STOP_SAFETY = 15.0 # N absolute max stop (regardless of n_safety and peak) FINGER IS CAUGHT ON SOMETHING....
 
         self.is_active = False
 
