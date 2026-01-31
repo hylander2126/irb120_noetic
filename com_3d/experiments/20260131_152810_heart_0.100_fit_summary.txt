@@ -1,0 +1,12 @@
+Batch Fit Results:
+  Push Phase:    m=0.202 kg, zc=0.101 m, th*=23.28 deg, MSE=0.0001
+  Retract Phase: m=0.228 kg, zc=0.099 m, th*=23.75 deg, MSE=0.0001
+  Weights: push=10422.2362, retract=16943.1058
+  COMBINED:      m=0.218 kg, zc=0.100 m, th*=23.57 deg
+
+Batch Fit Results:
+  Push Phase:    m=0.194 kg, zc=0.105 m, th*=22.50 deg, MSE=0.0001
+  Retract Phase: m=0.272 kg, zc=0.105 m, th*=22.52 deg, MSE=0.0000
+  Weights: push=9740.9683, retract=46486.2301
+  COMBINED:      m=0.258 kg, zc=0.105 m, th*=22.52 deg
+

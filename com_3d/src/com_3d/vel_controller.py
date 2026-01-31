@@ -439,7 +439,8 @@ class VelocityController:
             if force_watcher:
                 # Allow initial settling, then record baseline. Until then, force it back to MONITOR
                 if elapsed < 0.1:
-                        force_watcher.reset(force_state="MONITOR")
+                        force_watcher.reset(force_state="MONITOR") # Baseline already done, avoid CONTACT state
+                        pass
                 else:
                     rospy.loginfo_once("[VC] Force watcher is active and Monitoring!!")
                     if force_watcher.trigger_latched or force_watcher.STATE == "RETRACTING":

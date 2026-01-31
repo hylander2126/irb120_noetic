@@ -176,8 +176,12 @@ class BatchEstimator:
         # -----------------------------------------------------------
         # 2. MASKING for CONTACT and RETRACT DATA
         # -----------------------------------------------------------
-        push_mask = c_raw & (~r_raw)    # Push phase only
-        retr_mask = c_raw & (r_raw)   # Retract phase only
+        # NOTE: NEW: Discard data from early theta (~3degrees) to avoid vast majority of no-load data and transients
+        theta_min = np.deg2rad(2.0)
+        valid_theta = theta_exp >= theta_min
+
+        push_mask = c_raw & (~r_raw) & valid_theta   # Push phase only
+        retr_mask = c_raw & (r_raw) & valid_theta   # Retract phase only
 
         n_push = int(np.sum(push_mask))
         n_retr = int(np.sum(retr_mask))

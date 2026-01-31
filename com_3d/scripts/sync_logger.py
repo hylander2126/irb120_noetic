@@ -50,7 +50,6 @@ class FTClockLogger:
 
         pkg = rospkg.RosPack().get_path('com_3d')
         self.out_dir = os.path.join(pkg, 'experiments'); os.makedirs(self.out_dir, exist_ok=True)
-        self.traj_idx = 0
         self.recording = False
         self.csv_f = self.csv_w = None
         self.csv_lock = Lock()
@@ -59,8 +58,10 @@ class FTClockLogger:
         # --- video state ---
         self.bridge = CvBridge()
         self.writer = None
-        # self.frames_seen = 0
+        self.stem = None
+        self.csv_path = None
         self.video_path = None
+        self.session_open = False
 
         # FT state (contact, triggered, etc.)
         self.ft_contact_flag = 0
@@ -78,7 +79,7 @@ class FTClockLogger:
         rospy.Subscriber(self.ft_stream_topic, WrenchStamped, self._on_ft, queue_size=500)
         rospy.Subscriber(self.tag_topic, AprilTagDetectionArray, self._on_tag, queue_size=50)
         rospy.Subscriber('/com_3d/log_start', Empty, self._start, queue_size=1)
-        rospy.Subscriber('/com_3d/log_stop',  Empty, self._stop,  queue_size=1)
+        # rospy.Subscriber('/com_3d/log_stop',  Empty, self._stop,  queue_size=1)
         rospy.Subscriber('/com_3d/fw_contact_status', Bool, self._on_fw_contact)
         rospy.Subscriber('/com_3d/fw_trigger_status', Bool, self._on_fw_trigger)
         # --- image subscriber (buffered) ---
@@ -90,22 +91,25 @@ class FTClockLogger:
 
     def _start(self, _):
         with self.csv_lock:
-            if self.recording: return
-            # self.traj_idx += 1
+            # if self.recording: return
+            if self.csv_f is not None:
+                self.recording = True
+                return
+
             # Build a base name from datetime + object name
             object_name = rospy.get_param('/com_3d/object_name', 'unknown')
             n_safety = round(rospy.get_param('/com_3d/n_safety', 0.00), 3)
             base = self.run_base if self.run_base is not None else f"{self.timestamp}_{object_name}"
-            stem = f"{base}_{n_safety}" # t{self.traj_idx:02d}"
+            self.stem = f"{base}_{n_safety}" # t{self.traj_idx:02d}"
 
             # Publish current log stem and dir for other nodes (e.g. live plotter and estimator)
-            rospy.set_param('/com_3d/current_log_stem', stem)
+            rospy.set_param('/com_3d/current_log_stem', self.stem)
             rospy.set_param('/com_3d/current_log_dir',  self.out_dir)
 
-            path = os.path.join(self.out_dir, stem + ".csv")
-            self.video_path = os.path.join(self.out_dir, stem + ".mp4")
+            self.csv_path   = os.path.join(self.out_dir, self.stem + ".csv")
+            self.video_path = os.path.join(self.out_dir, self.stem + ".mp4")
             
-            self.csv_f = open(path, 'w', newline='')
+            self.csv_f = open(self.csv_path, 'w', newline='')
             self.csv_w = csv.writer(self.csv_f)
             self.csv_w.writerow([
                 'ros_time_sec',
@@ -116,14 +120,21 @@ class FTClockLogger:
                 'tag_x','tag_y','tag_z',
                 'fw_contact','ft_trigger'
             ])
+
+            # IMPORTANT: do NOT pre-release writer on stop; keep it for resume.
+            # But we do keep lazy-open behavior on first image frame:
+            self.writer = None
+
+            # self.session_open = True
+            
+
+            # ---- Resume Recording (segment start) ----
             self.recording = True
             self.last_flush = rospy.Time.now().to_sec()
-            # reset video state
-            self.writer = None
-            # self.frames_seen = 0
+            # reset per-segment flags
             self.ft_contact_flag = 0
             self.ft_trigger_flag = 0
-        rospy.loginfo("[ft_clock_logger] START -> %s", path)
+            rospy.loginfo("[ft_clock_logger] SESSION OPEN -> %s", self.csv_path)
 
     def _stop(self, _):
         with self.csv_lock:
@@ -145,6 +156,29 @@ class FTClockLogger:
                 self.csv_f = None
                 self.csv_w = None
         rospy.loginfo("[ft_clock_logger] STOP")
+
+    def shutdown(self):
+        # Always close resources on node shutdown
+        with self.csv_lock:
+            try:
+                if self.writer is not None:
+                    self.writer.release()
+            except Exception:
+                pass
+            self.writer = None
+
+            try:
+                if self.csv_f:
+                    self.csv_f.flush()
+                    self.csv_f.close()
+            except Exception:
+                pass
+            self.csv_f = None
+            self.csv_w = None
+
+            self.recording = False
+            self.session_open = False
+        rospy.loginfo("[ft_clock_logger] shutdown: closed CSV/video")
 
     def _on_tag(self, msg: AprilTagDetectionArray):
         # if not msg.detections: return

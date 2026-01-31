@@ -168,6 +168,7 @@ catkin_install_python(PROGRAMS
   scripts/push.py
   scripts/fk_tip_publisher.py
   scripts/live_fit_plotter.py
+  scripts/plot_and_log_node.py
   scripts/streaming_estimator.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

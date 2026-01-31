@@ -105,7 +105,7 @@ class LiveFitPlotter:
 
         print("[LiveFitPlotter] Ready. Waiting for data...")
 
-    def _build_stem(self):
+    def _build_stem(self): # From sync_logger
         """Match FTClockLogger naming convention exactly."""
         self.log_stem = rospy.get_param("/com_3d/current_log_stem", None)
         self.out_dir = rospy.get_param("/com_3d/current_log_dir", ".")

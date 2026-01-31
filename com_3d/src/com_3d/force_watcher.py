@@ -36,11 +36,17 @@ class ForceWatcher:
         # Contact detection parameters
         self.contact_delta = 0.09  # N above baseline to declare contact (this is our resolution!)
         self.contact_required = 4  # consecutive samples needed for contact
+        self.contact_count = 0
+        
         self.release_delta = 0.03  # N below baseline to declare release (smaller than contact so we don't unlatch while pushing)
         self.release_required = 8  # consecutive samples needed for release (no more contact)
+        self.release_count = 0
 
         # Falling / trigger parameters
+        self.min_contact_time = 0.25 # Seconds of contact before we can trigger (backup to fall samples)
+        self.contact_time = None
         self.fall_samples = 5     # consecutive samples needed for falling trigger
+        self.fall_count = 0
 
         # State
         self.STATE = initial_state
@@ -48,18 +54,12 @@ class ForceWatcher:
         self.contact_latched = False # True upon contact; latched until reset
         self.peak = 0.0
 
-        self.contact_count = 0
-        self.release_count = 0
-        self.below_count = 0
-
         self.sub_ft = rospy.Subscriber("/netft_data_transformed", WrenchStamped, self.ft_cb, queue_size=50)
 
         # The following publishers are so that logging can record when contact and trigger occurs
         self.pub_contact = rospy.Publisher('/com_3d/fw_contact_status', Bool, queue_size=1, latch=True)
         self.pub_retract = rospy.Publisher("/com_3d/retract_phase",     Bool, queue_size=1, latch=False)
         self.pub_trigger = rospy.Publisher('/com_3d/fw_trigger_status', Bool, queue_size=1, latch=True)
-
-        # Looks like lshape (lightest) has peaks F: 0.117 -> 0.128 -> 0.248 -> 0.331
         
         rospy.loginfo(f"[ForceWatcher] Armed with n_safety={self.n_safety}.")
 
@@ -70,9 +70,10 @@ class ForceWatcher:
         self.trigger_latched = False
         self.contact_latched = False
         self.contact_count = 0
-        self.below_count = 0
+        self.fall_count = 0
         self.peak = 0.0
         self.release_count = 0
+        self.contact_time = None
 
         # baseline reset
         self.baseline_ready = False
@@ -116,7 +117,7 @@ class ForceWatcher:
         # Bail out COMPLETELY if force (components or norm) exceeds absolute max
         if f_mag > self.F_STOP_SAFETY:
             rospy.logerr(f"Absolute force limit exceeded! |F|: {f_mag:.3f} N")
-            self.state = "RETRACTING"
+            self.STATE = "RETRACTING" # NEW, this was commented before
             self.trigger_latched = True
             return
 
@@ -153,6 +154,7 @@ class ForceWatcher:
                     self.STATE = "CONTACT"
                     self.contact_latched = True
                     self.release_count = 0
+                    self.contact_time = rospy.Time.now().to_sec() # NEW
             else:
                 self.contact_count = 0
 
@@ -172,14 +174,18 @@ class ForceWatcher:
             
             # Only check f_safe if peak is non-zero
             if self.peak > 0.0:
+                if self.contact_time is not None:
+                    if (rospy.Time.now().to_sec() - self.contact_time) < self.min_contact_time:
+                        self.fall_count = 0  # reset below count if min contact time not met
+                        return  # skip further processing until min contact time met
                 if f_med < thresh:
-                    self.below_count += 1
-                    if self.below_count >= self.fall_samples:
+                    self.fall_count += 1
+                    if self.fall_count >= self.fall_samples:
                         self.STATE = "RETRACTING"
                         self.trigger_latched = True
                         self.debug_msg(f"STOP! peak: {self.peak:.3f} N, f_safe: {thresh:.3f}, last: {f_med:.3f}")
                 else:
-                    self.below_count = 0
+                    self.fall_count = 0
 
         # ---------------- Release detection (un-contact) ----------------
         if self.STATE == "RETRACTING":

@@ -83,17 +83,19 @@
 
 
   <!-- LAUNCH ALL LOGGERS -->
-  <node pkg="com_3d" type="sync_logger.py" name="sync_logger" output="screen" args="-debug">
-    <!-- <param name="run_base" value="$(arg run_base)"/> This is the DATE formatted, passed in cmd (see scripts) -->
+  <!-- SWITCHED TO THE plot_and_log_node below for a combined plotter+logger experience -->
+  <!-- <node pkg="com_3d" type="sync_logger.py" name="sync_logger" output="screen" args="-debug">
     <param name="base_frame" value="base_link"/>
     <param name="ee_frame"   value="finger_tip"/>
     <param name="ft_topic"   value="/netft_data_transformed"/>
     <param name="dets_topic_name" value="/tag_detections"/>
     <param name="image_topic"   value="/tag_detections_image"/>
-    <!-- video/overlay config -->
     <param name="tag_max_age" value="0.10"/>
-    <param name="fps_hint"      value="30"/> <!-- Camera-specific (I think. Stick to 30fps for now.)-->
-  </node>
+    <param name="fps_hint"      value="30"/>
+  </node> -->
+
+  <node pkg="com_3d" type="plot_and_log_node.py" name="plot_and_log_node" output="screen"/>
+
 
   <!-- Run the FK tip pose publisher UNUSED IN ANY CODE AS OF 01/16/26 -->
   <!-- <node pkg="com_3d" type="fk_tip_publisher.py" name="fk_tip_publisher" output="screen"/> -->
@@ -132,12 +134,12 @@
   <!-- ######## LIVE PLOT (GUI) ###### -->
   <!-- ############################### -->
 
-  <node if="$(arg enable_live_plot)"
+  <!-- <node if="$(arg enable_live_plot)"
         pkg="com_3d"
         type="live_fit_plotter.py"
         name="live_fit_plotter"
         output="screen">
     <param name="update_hz" value="5"/>
-  </node>
+  </node> -->
   
 </launch>

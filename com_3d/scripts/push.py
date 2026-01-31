@@ -104,6 +104,7 @@ class EstimateListener:
         self._disarm_log_pub = rospy.Publisher('/com_3d/log_stop',  Empty, queue_size=1, latch=True)
         self._arm_est_pub = rospy.Publisher('/com_3d/est_start', Empty, queue_size=1, latch=True)
         self._disarm_est_pub = rospy.Publisher('/com_3d/est_stop',  Empty, queue_size=1, latch=True)
+        self._run_reset_pub = rospy.Publisher('/com_3d/run_reset', Empty, queue_size=1, latch=False)
 
         self._retract_pub = rospy.Publisher('/com_3d/retract_phase', Bool, queue_size=1, latch=False)
 
@@ -150,6 +151,9 @@ class EstimateListener:
 
     def disarm_estimate(self):
         self._disarm_est_pub.publish(Empty())
+
+    def run_reset(self):
+        self._run_reset_pub.publish(Empty())
     
 
 def check_manip_success(success: bool, action_desc: str) -> bool:
@@ -249,6 +253,7 @@ def main():
     DURATION    = 20.0 # 26.0 # 12.0 secs # I halved the push speed, so have to double duration
     SLOW_SPEED  = 0.0075 # 0.005 # 0.01 m/s
     SLOWEST_SPEED = max(SLOW_SPEED/2, 0.005) # Slower second push for better resolution
+    MED_SPEED   = min(SLOW_SPEED*2, 0.02) # 0.02 m/s
     JOINT_TOL   = 2e-3 # rad
 
     n_SAFETY = rospy.get_param("~n_safety", -1) # (1= full safety (stop upon contact), 0= full topple)
@@ -292,6 +297,8 @@ def main():
 
 
     try:
+        est.run_reset()  # Reset any previous estimator state / logs
+
         ## =================== BEGIN MOTION SEQUENCE ===================== 
         data = execute_push_sequence(
             ctrl, pos, quat, fw, est, 
@@ -339,9 +346,9 @@ def main():
             new_pos[0] -= retract_distance_abs_m
             # Now move backwards to get close to new X first.
             safe_cart_move = ctrl.cartesian_velocity(
-                v=[-SLOW_SPEED, 0, 0], # XYZ
+                v=[-MED_SPEED, 0, 0], # XYZ
                 w=[0, 0, 0],   # RPY
-                duration= (abs(retract_distance_abs_m) / SLOW_SPEED),
+                duration= (abs(retract_distance_abs_m) / MED_SPEED),
                 force_watcher=None,
                 lock_z=True, # LOCK Z MOTION
             )
@@ -355,9 +362,9 @@ def main():
         rospy.loginfo(f"[push] Approaching next push height with safe cartesian move of {delta_z:.4f} m.")
 
         success_approach = ctrl.cartesian_velocity(
-            v=[0, 0, np.sign(delta_z) * SLOW_SPEED], # XYZ
+            v=[0, 0, np.sign(delta_z) * MED_SPEED], # XYZ
             w=[0, 0, 0],   # RPY
-            duration=(abs(delta_z) / SLOW_SPEED)*0.9, # SLIGHLTY SHORTER TO NOT OVERSHOOT
+            duration=(abs(delta_z) / MED_SPEED)*0.9, # SLIGHLTY SHORTER TO NOT OVERSHOOT
             force_watcher=None,
             lock_z=False, # ALLOW Z MOTION
         )
@@ -365,7 +372,7 @@ def main():
             rospy.signal_shutdown("Safe approach to next push height failed.")
             return
 
-        # 5) Move to next pre-push height (with one retry)
+        # 5) EXECUTE SECOND PUSH SEQUENCE
         data = execute_push_sequence(
             ctrl, new_pos, quat, fw, est, # NEW_POS = [pos[0], pos[1], next_push_ht], 
             push_speed=SLOWEST_SPEED, # PUSH_SPEED, 
@@ -375,12 +382,28 @@ def main():
         )
 
         # 7) Return to original pre-push pose
+        if object_name == "monitor":
+            # NEED TO MOVE UPWARDS SAFELY SINCE WE BUMP OTHERWISE. CAN MOVE QUICKLY NOW.
+            distance_to_cover = pos[2] - next_push_ht
+            rospy.loginfo(f"[push] Moving UPWARDS to original pre-push height safely")
+            safe_cart_move = ctrl.cartesian_velocity(
+                v=[0, 0, MED_SPEED*2], # XYZ
+                w=[0, 0, 0],   # RPY
+                duration= (abs(distance_to_cover) / (MED_SPEED*2)),
+                force_watcher=None,
+                lock_z=False, # ALLOW Z MOTION
+            )
+            if not check_manip_success(safe_cart_move, "Safe upward move for monitor"):
+                rospy.signal_shutdown("Safe upward move for monitor failed.")
+                return
+            
         prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=1)
 
 
     finally:
         rospy.sleep(0.5)
         est.disarm_logs()  # Ensure logging is stopped AFTER ALL MOTIONS
+        est.run_reset()  # Reset estimator state for next run
         rospy.sleep(0.5)
         return
 
