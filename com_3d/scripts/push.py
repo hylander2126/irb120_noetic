@@ -313,6 +313,11 @@ def main():
         else:
             m_est, zc_est, theta_star = data
 
+        
+        # FOR NOW, WE ARE NOT DOING SECOND PUSH
+        prepush_procedure(ctrl, pos, quat, JOINT_TOL, retries=1)
+        return
+
         # *********************************************
         # ADAPTIVE SECOND PUSH DECISION BASED ON ESTIMATE
         if m_est is None or zc_est is None:

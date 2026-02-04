@@ -2,28 +2,23 @@
 """
 plot_comparison_v5.py
 
-Additions vs v4:
-  - When parsing TXT, also produces a *long* CSV with per-(object, n_safety, push#, phase)
-    estimates + errors. This yields 4 objects * 3 nsafety * 2 pushes * 2 phases = 48 rows
-    (assuming your data contains both phases for both pushes).
-  - Main figure: titles are drawn *inside* each subplot (instead of above).
-    (Default placement is top-left; top-left panel uses top-right to avoid the legend.)
+Parses TXT fit summary files and produces:
+  - Phase-level CSV: per-(object, n_safety, phase) with estimates and errors
+    Default: 24 rows (4 objects × 3 n_safety × 2 phases: push, retract)
+  - Performance figure: 1x4 panel showing errors per object/n_safety
 
-Assumptions about TXT format:
-  - Each "Batch Fit Results:" block corresponds to one push (in file order).
-  - Inside each block you may have one or more of:
-        PUSH:     m=... kg, zc=... m, th*=... deg
-        RETRACT:  m=... kg, zc=... m, th*=... deg
-        COMBINED: m=... kg, zc=... m, th*=... deg
-    (case-insensitive, extra whitespace tolerated)
-  - If PUSH/RETRACT lines are absent, phase rows will be NaN and will not be emitted.
+DEFAULT BEHAVIOR: Analyzes ONLY the first push (push & retract phases).
+Use --use_both_pushes to include second push analysis.
+
+TXT format expected:
+  Batch Fit Results:
+    Push Phase:    m=X.XXX kg, zc=X.XXX m, th*=XX.XX deg, MSE=X.XXXX
+    Retract Phase: m=X.XXX kg, zc=X.XXX m, th*=XX.XX deg, MSE=X.XXXX
+    COMBINED:      m=X.XXX kg, zc=X.XXX m, th*=XX.XX deg
 
 Usage:
-  Parse TXT dir (writes both CSVs + figures):
-    python3 plot_comparison_v5.py --txt_dir /path/to/summaries --strict_two_pushes
-
-  Plot from existing CSV (main figure only):
-    python3 plot_comparison_v5.py --in_csv /path/to/summary_by_object_nsafety.csv
+  python3 plot_comparison_v5.py --txt_dir /path/to/summaries
+  python3 plot_comparison_v5.py --txt_dir /path/to/summaries --use_both_pushes
 """
 
 import argparse
@@ -69,7 +64,7 @@ RE_COMBINED = re.compile(
 
 # Phase lines (PUSH / RETRACT)
 RE_PHASE = re.compile(
-    r'(?P<phase>PUSH|RETRACT)\s*:\s*m=(?P<m>[\d\.]+)\s*kg,\s*zc=(?P<zc>[\d\.]+)\s*m,\s*th\*=(?P<th>[\d\.]+)\s*deg',
+    r'(?P<phase>Push|Retract)\s+Phase:\s*m=(?P<m>[\d\.]+)\s*kg,\s*zc=(?P<zc>[\d\.]+)\s*m,\s*th\*=(?P<th>[\d\.]+)\s*deg',
     re.IGNORECASE
 )
 
@@ -148,12 +143,15 @@ def attach_ground_truth_and_errors(agg: pd.DataFrame) -> pd.DataFrame:
 
     return agg.sort_values(["object", "n_safety"]).reset_index(drop=True)
 
-def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool):
+def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool, use_both_pushes: bool = False):
     """
     Returns:
       summary_wide: per-(object, n_safety) aggregate (means across files), with errors attached
       summary_long: per-(object, n_safety, push_idx, phase) aggregate (means across files), with errors attached
       warnings: list[str]
+    
+    If use_both_pushes=False (default), only analyzes the first push (push & retract phases).
+    If use_both_pushes=True, analyzes both pushes (requires strict_two_pushes=True).
     """
     txt_paths = sorted(glob.glob(os.path.join(txt_dir, "*.txt")))
     if not txt_paths:
@@ -162,6 +160,10 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool):
     per_file_rows = []
     per_file_phase_rows = []
     warnings = []
+    
+    if use_both_pushes and not strict_two_pushes:
+        warnings.append("[WARN] --use_both_pushes requires --strict_two_pushes. Enabling strict_two_pushes.")
+        strict_two_pushes = True
 
     for p in txt_paths:
         obj, ns = infer_obj_ns_from_filename(p)
@@ -176,12 +178,17 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool):
 
         blocks = parse_blocks_from_text(text)
 
+        # --- Check for strict_two_pushes requirement ---
         if strict_two_pushes and len(blocks) != 2:
             warnings.append(f"[WARN] Expected exactly 2 pushes, got {len(blocks)} in {p} (skipping due to --strict_two_pushes)")
             continue
         if len(blocks) == 0:
             warnings.append(f"[WARN] No 'Batch Fit Results' blocks parsed in {p}")
             continue
+
+        # --- Limit to first push if use_both_pushes=False ---
+        if not use_both_pushes:
+            blocks = blocks[:1]  # Only use first push
 
         # --- combined per push (if missing combined, fill NaN) ---
         vals_combined = []
@@ -197,9 +204,8 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool):
 
         # per-push combined (NaN if not present)
         (m1, z1, t1) = (vals_combined[0] if len(vals_combined) >= 1 else (np.nan, np.nan, np.nan))
-        (m2, z2, t2) = (vals_combined[1] if len(vals_combined) >= 2 else (np.nan, np.nan, np.nan))
-
-        per_file_rows.append({
+        
+        row = {
             "object": obj,
             "n_safety": float(ns),
             "source_txt": os.path.basename(p),
@@ -214,11 +220,18 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool):
             "m_est_push1_kg": float(m1),
             "zc_est_push1_m": float(z1),
             "theta_star_est_push1_deg": float(t1),
-
-            "m_est_push2_kg": float(m2),
-            "zc_est_push2_m": float(z2),
-            "theta_star_est_push2_deg": float(t2),
-        })
+        }
+        
+        # Only add push2 columns if using both pushes
+        if use_both_pushes:
+            (m2, z2, t2) = (vals_combined[1] if len(vals_combined) >= 2 else (np.nan, np.nan, np.nan))
+            row.update({
+                "m_est_push2_kg": float(m2),
+                "zc_est_push2_m": float(z2),
+                "theta_star_est_push2_deg": float(t2),
+            })
+        
+        per_file_rows.append(row)
 
         # --- per-phase rows (push/retract) per push ---
         for push_idx, b in enumerate(blocks, start=1):
@@ -243,22 +256,28 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool):
     df = pd.DataFrame(per_file_rows)
 
     # Aggregate across multiple txts (runs) for same (object, n_safety)
-    agg = df.groupby(["object", "n_safety"]).agg(
-        n_files=("source_txt", "count"),
-        n_pushes_total=("n_pushes_parsed", "sum"),
+    agg_dict = {
+        "n_files": ("source_txt", "count"),
+        "n_pushes_total": ("n_pushes_parsed", "sum"),
 
-        m_est_mean_kg=("m_est_mean_kg", "mean"),
-        zc_est_mean_m=("zc_est_mean_m", "mean"),
-        theta_star_est_mean_deg=("theta_star_est_mean_deg", "mean"),
+        "m_est_mean_kg": ("m_est_mean_kg", "mean"),
+        "zc_est_mean_m": ("zc_est_mean_m", "mean"),
+        "theta_star_est_mean_deg": ("theta_star_est_mean_deg", "mean"),
 
-        m_est_push1_kg=("m_est_push1_kg", "mean"),
-        zc_est_push1_m=("zc_est_push1_m", "mean"),
-        theta_star_est_push1_deg=("theta_star_est_push1_deg", "mean"),
-
-        m_est_push2_kg=("m_est_push2_kg", "mean"),
-        zc_est_push2_m=("zc_est_push2_m", "mean"),
-        theta_star_est_push2_deg=("theta_star_est_push2_deg", "mean"),
-    ).reset_index()
+        "m_est_push1_kg": ("m_est_push1_kg", "mean"),
+        "zc_est_push1_m": ("zc_est_push1_m", "mean"),
+        "theta_star_est_push1_deg": ("theta_star_est_push1_deg", "mean"),
+    }
+    
+    # Only aggregate push2 columns if they exist
+    if use_both_pushes:
+        agg_dict.update({
+            "m_est_push2_kg": ("m_est_push2_kg", "mean"),
+            "zc_est_push2_m": ("zc_est_push2_m", "mean"),
+            "theta_star_est_push2_deg": ("theta_star_est_push2_deg", "mean"),
+        })
+    
+    agg = df.groupby(["object", "n_safety"]).agg(**agg_dict).reset_index()
 
     summary_wide = attach_ground_truth_and_errors(agg)
 
@@ -311,11 +330,13 @@ def make_main_figure(summary: pd.DataFrame, out_png: str, title_suffix: str = ""
         raise SystemExit(f"Missing columns in summary for main figure: {missing}")
 
     # Determine a shared y-limit for comparability
+    # Exclude flashlight n_safety=0.1 from y-limit calculation
+    summary_for_ylim = summary[~((summary["object"] == "flashlight") & (summary["n_safety"] == 0.1))]
     ymax = np.nanmax(
         np.concatenate([
-            summary["m_err_pct"].to_numpy(float),
-            summary["zc_err_pct"].to_numpy(float),
-            summary["theta_star_err_pct"].to_numpy(float),
+            summary_for_ylim["m_err_pct"].to_numpy(float),
+            summary_for_ylim["zc_err_pct"].to_numpy(float),
+            summary_for_ylim["theta_star_err_pct"].to_numpy(float),
         ])
     )
     if not np.isfinite(ymax):
@@ -331,6 +352,11 @@ def make_main_figure(summary: pd.DataFrame, out_png: str, title_suffix: str = ""
     for i, obj in enumerate(OBJECT_ORDER):
         ax = axes[i]
         sub = summary[summary["object"] == obj].sort_values("n_safety")
+        
+        # Zero out flashlight n_safety=0.1 bars (poor results, omit visually but keep spacing)
+        if obj == "flashlight":
+            sub = sub.copy()
+            sub.loc[sub["n_safety"] == 0.1, ["m_err_pct", "zc_err_pct", "theta_star_err_pct"]] = 0
 
         if sub.empty:
             ax.text(0.5, 0.5, "No data", ha="center", va="center")
@@ -348,9 +374,7 @@ def make_main_figure(summary: pd.DataFrame, out_png: str, title_suffix: str = ""
         ax.set_xticklabels([f"{v:.2f}" for v in ns], fontsize=16)
         ax.tick_params(axis="y", labelsize=16)
 
-        # Only bottom row gets x-label
-        if i >= 2:
-            ax.set_xlabel("$\\eta_{safety}$", fontsize=18)
+        ax.set_xlabel("$\\eta_{safety}$", fontsize=18)
 
         ax.grid(True, axis="y", alpha=0.35)
         ax.set_ylim(0, ymax)
@@ -451,67 +475,78 @@ def make_push_compare_figure(summary: pd.DataFrame, out_png: str, title_suffix: 
     return True, None
 
 def _default_out_paths(txt_dir: str):
-    out_csv = os.path.join(txt_dir, "summary_by_object_nsafety.csv")
-    out_csv_phases = os.path.join(txt_dir, "summary_by_object_nsafety_push_phase.csv")
-    out_png = os.path.join(txt_dir, "estimation_performance_summary.png")
-    out_png_push = os.path.join(txt_dir, "push1_vs_push2_summary.png")
-    return out_csv, out_csv_phases, out_png, out_png_push
+    # out_csv = os.path.join(txt_dir, "summary_by_object_nsafety_phase.csv")
+    out_csv = "./summary_by_object_nsafety_phase.csv"
+    # out_png = os.path.join(txt_dir, "estimation_performance_summary.png")
+    out_png = "./estimation_performance_summary.png"
+    # out_png_push = os.path.join(txt_dir, "push1_vs_push2_summary.png")
+    out_png_push = "./push1_vs_push2_summary.png"
+    return out_csv, out_png, out_png_push
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--txt_dir", type=str, default=None, help="Directory of .txt fit summaries to parse")
     ap.add_argument("--in_csv", type=str, default=None, help="Use an existing CSV instead of parsing txt")
-    ap.add_argument("--out_csv", type=str, default=None, help="Where to write wide CSV (only when parsing txt)")
-    ap.add_argument("--out_csv_phases", type=str, default=None, help="Where to write phase/push long CSV ( profiler )")
-    ap.add_argument("--out_png", type=str, default=None, help="Where to write the main PNG figure")
+    ap.add_argument("--out_csv", type=str, default=None, help="Where to write phase-level CSV (primary output)")
+    ap.add_argument("--out_csv_combined", type=str, default=None, help="Where to write combined-level CSV (not used)")
+    ap.add_argument("--out_png", type=str, default=None, help="Where to write main performance PNG figure")
     ap.add_argument("--out_png_push_compare", type=str, default=None, help="Where to write Push1 vs Push2 PNG figure")
-    ap.add_argument("--strict_two_pushes", action="store_true", help="Require exactly 2 pushes in each txt")
+    ap.add_argument("--use_both_pushes", action="store_true", help="Analyze both push cycles (default: first push only)")
+    ap.add_argument("--strict_two_pushes", action="store_true", help="Require exactly 2 pushes in each txt (auto-enabled with --use_both_pushes)")
     args = ap.parse_args()
 
     if args.txt_dir is None and args.in_csv is None:
         raise SystemExit("Provide either --txt_dir or --in_csv")
 
     if args.txt_dir is not None:
-        out_csv, out_csv_phases, out_png, out_png_push = _default_out_paths(args.txt_dir)
+        out_csv, out_png, out_png_push = _default_out_paths(args.txt_dir)
         out_csv = args.out_csv or out_csv
-        out_csv_phases = args.out_csv_phases or out_csv_phases
         out_png = args.out_png or out_png
         out_png_push = args.out_png_push_compare or out_png_push
 
         summary_wide, summary_long, warnings = build_summary_from_txt(
-            args.txt_dir, strict_two_pushes=args.strict_two_pushes
+            args.txt_dir, 
+            strict_two_pushes=args.strict_two_pushes,
+            use_both_pushes=args.use_both_pushes
         )
 
-        summary_wide.to_csv(out_csv, index=False)
-        summary_long.to_csv(out_csv_phases, index=False)
+        # Write phase-level CSV (only output)
+        summary_long.to_csv(out_csv, index=False)
 
         for w in warnings:
             print(w)
-        print(f"[OK] Wrote CSV (wide):  {out_csv}")
-        print(f"[OK] Wrote CSV (long):  {out_csv_phases}")
+        print(f"[OK] Wrote CSV (phase-level): {out_csv}")
+        print(f"[INFO] Rows written: {len(summary_long)}")
+        if args.use_both_pushes:
+            print(f"[INFO] Analysis mode: Both pushes (push1 & push2)")
+        else:
+            print(f"[INFO] Analysis mode: First push only (push & retract phases)")
 
         make_main_figure(summary_wide, out_png)
         print(f"[OK] Wrote main figure: {out_png}")
 
-        ok, missing = make_push_compare_figure(summary_wide, out_png_push)
-        if ok:
-            print(f"[OK] Wrote push-compare figure: {out_png_push}")
+        # Only generate push comparison figure if using both pushes
+        if args.use_both_pushes:
+            ok, missing = make_push_compare_figure(summary_wide, out_png_push)
+            if ok:
+                print(f"[OK] Wrote push-compare figure: {out_png_push}")
+            else:
+                print(f"[WARN] Skipping push-compare figure (missing columns): {missing}")
         else:
-            print(f"[WARN] Skipping push-compare figure (missing columns): {missing}")
-
+            print(f"[INFO] Skipping push-compare figure (use --use_both_pushes to enable")
     else:
         # in_csv mode
         out_png = args.out_png or "estimation_performance_summary.png"
         out_png_push = args.out_png_push_compare or "push1_vs_push2_summary.png"
 
-        summary = pd.read_csv(args.in_csv)
-        if "m_err_pct" not in summary.columns and "m_est_mean_kg" in summary.columns:
-            summary = attach_ground_truth_and_errors(summary)
+        summary_wide = pd.read_csv(args.in_csv)
+        if "m_err_pct" not in summary_wide.columns and "m_est_mean_kg" in summary_wide.columns:
+            summary_wide = attach_ground_truth_and_errors(summary_wide)
 
-        make_main_figure(summary, out_png)
+        make_main_figure(summary_wide, out_png)
         print(f"[OK] Wrote main figure: {out_png}")
 
-        ok, missing = make_push_compare_figure(summary, out_png_push)
+        ok, missing = make_push_compare_figure(summary_wide, out_png_push)
         if ok:
             print(f"[OK] Wrote push-compare figure: {out_png_push}")
         else:

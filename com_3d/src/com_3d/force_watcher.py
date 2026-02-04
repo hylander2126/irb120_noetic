@@ -54,6 +54,12 @@ class ForceWatcher:
         self.contact_latched = False # True upon contact; latched until reset
         self.peak = 0.0
 
+        # We use the following to keep contact latched after trigger for a set period. This avoids False Positive 'un-contact' during retract.
+        self.contact_instant = None # Time of initial contact in seconds
+        self.trigger_instant = None # Time of trigger in seconds
+        self.retracting_start_time = None # Time when we entered RETRACTING state (for release guard window)
+        self.release_guard_time = 0.5 # Seconds to wait before checking for release after entering RETRACTING (avoids false positives during stop→retract transition)
+
         self.sub_ft = rospy.Subscriber("/netft_data_transformed", WrenchStamped, self.ft_cb, queue_size=50)
 
         # The following publishers are so that logging can record when contact and trigger occurs
@@ -74,6 +80,7 @@ class ForceWatcher:
         self.peak = 0.0
         self.release_count = 0
         self.contact_time = None
+        self.retracting_start_time = None # Reset guard timer on new run
 
         # baseline reset
         self.baseline_ready = False
@@ -182,6 +189,7 @@ class ForceWatcher:
                     self.fall_count += 1
                     if self.fall_count >= self.fall_samples:
                         self.STATE = "RETRACTING"
+                        self.retracting_start_time = rospy.Time.now().to_sec()  # Start guard timer
                         self.trigger_latched = True
                         self.debug_msg(f"STOP! peak: {self.peak:.3f} N, f_safe: {thresh:.3f}, last: {f_med:.3f}")
                 else:
@@ -189,6 +197,13 @@ class ForceWatcher:
 
         # ---------------- Release detection (un-contact) ----------------
         if self.STATE == "RETRACTING":
+            # Check if we're still within the guard window (skip release detection during stop→retract transition)
+            if self.retracting_start_time is not None:
+                time_in_retracting = rospy.Time.now().to_sec() - self.retracting_start_time
+                if time_in_retracting < self.release_guard_time:
+                    # Still in guard window; don't check for release yet
+                    return
+
             # Only attempt release if we already latched contact and baseline exists
             release_thresh = self.noise_floor + self.release_delta
 

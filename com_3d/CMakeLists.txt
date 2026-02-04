@@ -162,12 +162,12 @@ catkin_install_python(PROGRAMS
   # scripts/egm_settings_and_jtc_init.py
   # scripts/go_home.py
   # scripts/move.py
-  scripts/sync_logger.py
+  # scripts/sync_logger.py
   scripts/transform_netft.py  
   scripts/vel_move.py
   scripts/push.py
   scripts/fk_tip_publisher.py
-  scripts/live_fit_plotter.py
+  # scripts/live_fit_plotter.py
   scripts/plot_and_log_node.py
   scripts/streaming_estimator.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
