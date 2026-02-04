@@ -62,6 +62,12 @@ RE_COMBINED = re.compile(
     re.IGNORECASE
 )
 
+# Weights line
+RE_WEIGHTS = re.compile(
+    r'Weights:\s*push=(?P<push>[\d\.]+),\s*retract=(?P<retract>[\d\.]+)',
+    re.IGNORECASE
+)
+
 # Phase lines (PUSH / RETRACT)
 RE_PHASE = re.compile(
     r'(?P<phase>Push|Retract)\s+Phase:\s*m=(?P<m>[\d\.]+)\s*kg,\s*zc=(?P<zc>[\d\.]+)\s*m,\s*th\*=(?P<th>[\d\.]+)\s*deg',
@@ -84,17 +90,22 @@ def parse_blocks_from_text(text: str):
         "combined": (m, zc, th) or None,
         "push":     (m, zc, th) or None,
         "retract":  (m, zc, th) or None,
+        "weights":  (w_push, w_retract) or None,
       }
     """
     chunks = RE_BLOCK_SPLIT.split(text)
     blocks = [c.strip() for c in chunks if c.strip()]
     out = []
     for b in blocks:
-        d = {"combined": None, "push": None, "retract": None}
+        d = {"combined": None, "push": None, "retract": None, "weights": None}
 
         mc = RE_COMBINED.search(b)
         if mc:
             d["combined"] = (float(mc.group("m")), float(mc.group("zc")), float(mc.group("th")))
+
+        mw = RE_WEIGHTS.search(b)
+        if mw:
+            d["weights"] = (float(mw.group("push")), float(mw.group("retract")))
 
         # phase matches (there may be 0, 1, or 2)
         for mp in RE_PHASE.finditer(b):
@@ -239,6 +250,11 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool, use_both_pushe
                 v = b.get(phase, None)
                 if v is None:
                     continue  # do not emit missing phase
+                w_push = None
+                w_retr = None
+                if b.get("weights") is not None:
+                    w_push, w_retr = b["weights"]
+                w_phase = w_push if phase == "push" else w_retr
                 per_file_phase_rows.append({
                     "object": obj,
                     "n_safety": float(ns),
@@ -248,6 +264,7 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool, use_both_pushe
                     "m_est_kg": float(v[0]),
                     "zc_est_m": float(v[1]),
                     "theta_star_est_deg": float(v[2]),
+                    "weight": float(w_phase) if w_phase is not None else np.nan,
                 })
 
     if not per_file_rows:
@@ -285,10 +302,10 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool, use_both_pushe
     if per_file_phase_rows:
         dph = pd.DataFrame(per_file_phase_rows)
         aggph = dph.groupby(["object", "n_safety", "push_idx", "phase"]).agg(
-            n_files=("source_txt", "count"),
             m_est_kg=("m_est_kg", "mean"),
             zc_est_m=("zc_est_m", "mean"),
             theta_star_est_deg=("theta_star_est_deg", "mean"),
+            weight=("weight", "mean"),
         ).reset_index()
 
         # attach GT and errors
@@ -307,8 +324,8 @@ def build_summary_from_txt(txt_dir: str, strict_two_pushes: bool, use_both_pushe
         summary_long = aggph
     else:
         summary_long = pd.DataFrame(columns=[
-            "object","n_safety","push_idx","phase","n_files",
-            "m_est_kg","zc_est_m","theta_star_est_deg",
+            "object","n_safety","push_idx","phase",
+            "m_est_kg","zc_est_m","theta_star_est_deg","weight",
             "m_gt_kg","zc_gt_m","theta_star_gt_deg",
             "m_err_pct","zc_err_pct","theta_star_err_pct",
         ])

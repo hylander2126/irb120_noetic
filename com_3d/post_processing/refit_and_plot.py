@@ -45,8 +45,6 @@ from scipy.signal import butter, filtfilt
 THETA_STAR_GT_DEG = 17.2  # Ground truth theta_star (degrees) - change this for different objects/targets
 DECIMATE = 40  # Data point decimation factor - adjust for readability
 N_SAFETY_VALUES = [0.100, 0.500, 0.650]  # n_safety trials to process
-THETA_MIN_DEG = 1.0  # Ignore data below this angle (degrees)
-THETA_MAX_MARGIN_DEG = 1.0  # Ignore data within this margin of max angle (degrees)
 SUMMARY_CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summary_by_object_nsafety_phase.csv")
 # =========================
 
@@ -105,12 +103,6 @@ class RefitEstimator:
         rot_vecs = np.array(rot_vecs)
         theta_exp = filtfilt(self.b, self.a, np.linalg.norm(rot_vecs, axis=1))
 
-        # Masking
-        theta_min = np.deg2rad(THETA_MIN_DEG)
-        theta_max = float(np.nanmax(theta_exp))
-        theta_max_allowed = theta_max - np.deg2rad(THETA_MAX_MARGIN_DEG)
-        valid_theta = (theta_exp >= theta_min) & (theta_exp <= theta_max_allowed)
-
         # Only first push: find where contact first becomes True
         contact_indices = np.where(c_raw)[0]
         if len(contact_indices) == 0:
@@ -132,8 +124,8 @@ class RefitEstimator:
         push_mask = np.zeros(len(c_raw), dtype=bool)
         retr_mask = np.zeros(len(c_raw), dtype=bool)
         
-        push_mask[contact_start:retract_start] = c_raw[contact_start:retract_start] & (~r_raw[contact_start:retract_start]) & valid_theta[contact_start:retract_start]
-        retr_mask[retract_start:contact_end+1] = c_raw[retract_start:contact_end+1] & (r_raw[retract_start:contact_end+1]) & valid_theta[retract_start:contact_end+1]
+        push_mask[contact_start:retract_start] = c_raw[contact_start:retract_start] & (~r_raw[contact_start:retract_start])
+        retr_mask[retract_start:contact_end+1] = c_raw[retract_start:contact_end+1] & r_raw[retract_start:contact_end+1]
 
         n_push = int(np.sum(push_mask))
         n_retr = int(np.sum(retr_mask))
@@ -171,15 +163,21 @@ class RefitEstimator:
                 "m": float(row["m_est_kg"]),
                 "zc": float(row["zc_est_m"]),
                 "ths_deg": float(row["theta_star_est_deg"]),
+                "weight": float(row["weight"]),
             }
 
         fit_push = _get_phase_est("push")
         fit_retr = _get_phase_est("retract")
 
-        # Combined estimate for annotation (mean of phase estimates)
-        m_est = 0.5 * (fit_push["m"] + fit_retr["m"])
-        zc_est = 0.5 * (fit_push["zc"] + fit_retr["zc"])
-        ths_est = float(np.arctan2(self.d, zc_est))
+        # Combined estimate for annotation (weighted average using CSV weights)
+        w_push = fit_push["weight"]
+        w_retr = fit_retr["weight"]
+        w_total = w_push + w_retr
+        
+        m_est = (w_push * fit_push["m"] + w_retr * fit_retr["m"]) / w_total
+        zc_est = (w_push * fit_push["zc"] + w_retr * fit_retr["zc"]) / w_total
+        ths_est_deg = (w_push * fit_push["ths_deg"] + w_retr * fit_retr["ths_deg"]) / w_total
+        ths_est = float(np.deg2rad(ths_est_deg))
 
         return {
             "fit_push": fit_push,
