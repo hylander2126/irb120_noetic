@@ -1,0 +1,16 @@
+{
+  "runs": [
+    {"object": "box", "n_safety": 0.1, "csv": "../experiments/20260131_box_0.100.csv"},
+    {"object": "box", "n_safety": 0.5, "csv": "../experiments/20260131_box_0.500.csv"},
+    {"object": "box", "n_safety": 0.65, "csv": "../experiments/20260131_box_0.650.csv"},
+    {"object": "heart", "n_safety": 0.1, "csv": "../experiments/20260131_heart_0.100.csv"},
+    {"object": "heart", "n_safety": 0.5, "csv": "../experiments/20260131_heart_0.500.csv"},
+    {"object": "heart", "n_safety": 0.65, "csv": "../experiments/20260131_heart_0.650.csv"},
+    {"object": "flashlight", "n_safety": 0.1, "csv": "../experiments/20260131_flashlight_0.100.csv"},
+    {"object": "flashlight", "n_safety": 0.5, "csv": "../experiments/20260131_flashlight_0.500.csv"},
+    {"object": "flashlight", "n_safety": 0.65, "csv": "../experiments/20260131_flashlight_0.650.csv"},
+    {"object": "monitor", "n_safety": 0.1, "csv": "../experiments/20260131_monitor_0.100.csv"},
+    {"object": "monitor", "n_safety": 0.5, "csv": "../experiments/20260131_monitor_0.500.csv"},
+    {"object": "monitor", "n_safety": 0.65, "csv": "../experiments/20260131_monitor_0.650.csv"}
+  ]
+}

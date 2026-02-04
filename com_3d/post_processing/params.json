@@ -1,0 +1,82 @@
+{
+  "box": {
+    "0.1": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.5": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.65": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    }
+  },
+  "heart": {
+    "0.1": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.5": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.65": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    }
+  },
+  "flashlight": {
+    "0.1": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.5": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.65": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    }
+  },
+  "monitor": {
+    "0.1": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.5": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    },
+    "0.65": {
+      "estimates": [
+        { "m_kg": 0.66, "z_m": 0.143, "theta_star_deg": 17.6 },
+        { "m_kg": 0.66, "z_m": 0.142, "theta_star_deg": 17.6 }
+      ]
+    }
+  }
+}
