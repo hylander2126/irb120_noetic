@@ -10,16 +10,16 @@ Takes a raw experiment CSV (from sync_logger) and:
   3. Generates a publication-quality plot with scatter data and fitted curves
 
 Features:
-  - Customizable ground truth theta_star value
+  - Ground truth theta_star loaded from OBJECT_GROUND_TRUTH definitions
   - Data point decimation for plot readability
   - Supports both push and retract phase visualization
   - Batch processing by object: processes all n_safety trials (0.100, 0.500, 0.650)
     - Uses experiment estimates from summary_by_object_nsafety_phase.csv (no refitting)
 
 ===== CONFIGURATION =====
-THETA_STAR_GT_DEG: Ground truth theta_star value in degrees (used for all trials)
 DECIMATE: Data point decimation factor (1 = no decimation)
 N_SAFETY_VALUES: List of n_safety values to process (default: [0.100, 0.500, 0.650])
+OBJECT_GROUND_TRUTH: Dictionary defining m_kg, zc_m, rc0_m, and theta_star_deg for each object
 =========================
 
 Usage:
@@ -40,12 +40,42 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import butter, filtfilt
+from scipy.optimize import curve_fit
+from scipy.stats import linregress
 
 # ===== CONFIGURATION =====
-THETA_STAR_GT_DEG = 17.2  # Ground truth theta_star (degrees) - change this for different objects/targets
 DECIMATE = 40  # Data point decimation factor - adjust for readability
 N_SAFETY_VALUES = [0.100, 0.500, 0.650]  # n_safety trials to process
 SUMMARY_CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summary_by_object_nsafety_phase.csv")
+
+# ===== OBJECT GROUND TRUTH VALUES =====
+# Define ground truth parameters for each object here (mass in kg, zc in m, theta_star in degrees)
+OBJECT_GROUND_TRUTH = {
+    "box": {
+        "m_kg": 0.658, # 0.664
+        "zc_m": 0.14624,
+        "rc0_m": [-0.04515, 0, 0],
+        "theta_star_deg": np.rad2deg(np.arctan2(0.04515, 0.14624)), # atan((x^2 + y^2)^0.5 / z)
+    },
+    "heart": {
+        "m_kg": 0.236,
+        "zc_m": 0.098,
+        "rc0_m": [-0.04354, 0, 0],
+        "theta_star_deg": np.rad2deg(np.arctan2(0.04354, 0.098)),
+    },
+    "monitor": {
+        "m_kg": 5.040, # 5.008
+        "zc_m": 0.2316, # 0.2516 # 0.2316 close...
+        "rc0_m": [-0.06107, 0, 0],# [-0.06207, 0, 0], 0.06107 close
+        "theta_star_deg": np.rad2deg(np.arctan2(0.06107, 0.2316)),
+    },
+    "flashlight": {
+        "m_kg": 0.387,
+        "zc_m": 0.09656,
+        "rc0_m": [-0.0230, 0, 0],
+        "theta_star_deg": np.rad2deg(np.arctan2(0.0230, 0.09656)),
+    },
+}
 # =========================
 
 # Import com_3d utilities
@@ -67,6 +97,73 @@ class RefitEstimator:
         self.fs_hz = fs_hz
         # Filter params (4th order, 5Hz)
         self.b, self.a = butter(4, 5.0, fs=self.fs_hz, btype='low')
+
+    def _fit_phase_params(self, th, tau_vec):
+        """
+        Fit (m, zc) parameters for one phase from theta and torque data.
+        Returns dict with fitted parameters, inlier indices, and goodness of fit (MSE).
+        """
+        th_orig = np.asarray(th, float).reshape(-1)
+        tau_vec_orig = np.asarray(tau_vec, float).reshape(-1, 3)
+        
+        # Exclude first ~2 degrees where transients and outliers cluster
+        theta_min = np.deg2rad(2.0)
+        valid_theta_mask = th_orig >= theta_min
+        valid_theta_indices = np.where(valid_theta_mask)[0]
+        
+        th = th_orig[valid_theta_mask]
+        tau_vec = tau_vec_orig[valid_theta_mask]
+        tau_proj = tau_vec @ self.e_hat  # (N,)
+
+        # Linear seed
+        slope, intercept, *_ = linregress(th, tau_proj)
+        ths0 = float(np.clip(-intercept / (slope + 1e-12), 1e-2, np.pi/2))
+        z0 = float(np.clip(abs(self.d / np.tan(ths0)), 0.02, 1.0))
+        m0 = float(np.clip(abs(slope) / (9.81 * max(z0, 1e-3)), 0.05, 20.0))
+
+        # Outlier rejection (tighter threshold for better rejection)
+        outlier_k = 2.0
+        resid = tau_proj - (slope * th + intercept)
+        med = np.median(resid)
+        mad = np.median(np.abs(resid - med))
+        sigma = 1.4826 * mad + 1e-12
+        inliers = np.abs(resid - med) <= (outlier_k * sigma)
+        inlier_indices_relative = np.where(inliers)[0]
+        
+        # Map back to original indices (accounting for theta_min filtering)
+        inlier_indices = valid_theta_indices[inlier_indices_relative]
+
+        th_in = th[inliers]
+        tau_in = tau_vec[inliers]
+
+        # Nonlinear fit
+        def _fit_target(th_in, m, zc):
+            return tau_model(th_in, m, zc, rc0_known=self.rc0, e_hat=self.e_hat)
+
+        popt, _ = curve_fit(
+            _fit_target,
+            th_in,
+            tau_in.reshape(-1),
+            p0=[m0, z0],
+            bounds=([0.01, 0.01], [20.0, 1.0]),
+            maxfev=4000
+        )
+        m_est, zc_est = map(float, popt)
+        ths_est = float(np.arctan2(self.d, zc_est))
+        
+        # Calculate goodness of fit (MSE on inliers)
+        tau_fit = tau_model(th_in, m_est, zc_est, rc0_known=self.rc0, e_hat=self.e_hat).reshape(-1, 3)
+        tau_fit_proj = tau_fit @ self.e_hat
+        mse = float(np.mean((tau_in @ self.e_hat - tau_fit_proj) ** 2))
+
+        return {
+            "m": m_est,
+            "zc": zc_est,
+            "ths": ths_est,
+            "mse": mse,  # Goodness of fit metric
+            "inlier_indices": inlier_indices,  # Return inlier indices for plotting
+        }
+
 
     def process(self, csv_path, summary_df, object_name, n_safety, q_ref=None):
         """
@@ -191,6 +288,7 @@ class RefitEstimator:
             "tau_retr": tau_retr,
             "rc0": self.rc0,
             "e_hat": self.e_hat,
+            "estimator": self,  # Include estimator so make_fit_plot can use _fit_phase_params
         }
 
 
@@ -204,36 +302,55 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
         csv_path: path to source CSV (used to determine output filename)
         decimate: downsample factor for data points (1 = no decimation)
     """
-    fit_push = process_result["fit_push"]
-    fit_retr = process_result["fit_retr"]
-    ths_est = process_result["ths_est"]
-    m_est = process_result["m_est"]
-    zc_est = process_result["zc_est"]
-
-    # Extract data (use masked data; no refitting)
+    estimator = process_result["estimator"]
+    
+    # Extract raw data (not decimated yet)
     th_p = process_result["th_push"]
     tau_p_vec = process_result["tau_push"].reshape(-1, 3)
     th_r = process_result["th_retr"]
     tau_r_vec = process_result["tau_retr"].reshape(-1, 3)
 
     e_hat = process_result["e_hat"]
+    rc0 = process_result["rc0"]
+    
     tau_p = tau_p_vec @ e_hat
     tau_r = tau_r_vec @ e_hat
 
-    # Decimate if requested
-    if decimate > 1:
-        th_p = th_p[::decimate]
-        tau_p = tau_p[::decimate]
-        th_r = th_r[::decimate]
-        tau_r = tau_r[::decimate]
+    # FIT the data to get parameters (not use pre-computed summaries)
+    fit_push = estimator._fit_phase_params(th_p, tau_p_vec)
+    fit_retr = estimator._fit_phase_params(th_r, tau_r_vec)
 
-    # Generate fit curves over full range
-    th_full = np.linspace(0, max(np.concatenate([th_p, th_r])) * 1.05, 200)
+    # Extract inlier indices for each phase
+    inlier_idx_push = fit_push["inlier_indices"]
+    inlier_idx_retr = fit_retr["inlier_indices"]
     
-    # Fit curves using estimated parameters
-    # Note: tau_model returns raveled (N*3,), so we need to extract the projected component
-    # For simplicity, we'll compute tau values directly
-    rc0 = process_result["rc0"]
+    # Extract only inliers for plotting
+    th_p_inliers = th_p[inlier_idx_push]
+    tau_p_inliers = tau_p[inlier_idx_push]
+    th_r_inliers = th_r[inlier_idx_retr]
+    tau_r_inliers = tau_r[inlier_idx_retr]
+
+    # Weighted combined estimate
+    w_push = 1.0  # Equal weighting for fitting
+    w_retr = 1.0
+    m_est = (w_push * fit_push["m"] + w_retr * fit_retr["m"]) / (w_push + w_retr)
+    zc_est = (w_push * fit_push["zc"] + w_retr * fit_retr["zc"]) / (w_push + w_retr)
+    ths_est = float(np.arctan2(estimator.d, zc_est))
+
+    # Decimate for display (only inliers)
+    if decimate > 1:
+        th_p_plot = th_p_inliers[::decimate]
+        tau_p_plot = tau_p_inliers[::decimate]
+        th_r_plot = th_r_inliers[::decimate]
+        tau_r_plot = tau_r_inliers[::decimate]
+    else:
+        th_p_plot = th_p_inliers
+        tau_p_plot = tau_p_inliers
+        th_r_plot = th_r_inliers
+        tau_r_plot = tau_r_inliers
+
+    # Generate smooth fit curves over full range
+    th_full = np.linspace(0, max(np.concatenate([th_p_inliers, th_r_inliers])) * 1.05, 200)
     
     def tau_scalar(th, m, zc):
         """Compute scalar torque projection onto e_hat."""
@@ -257,11 +374,11 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
     ax.axhline(0, color='cyan', linewidth=1.5, label='_', zorder=2)
                
     # Plot push phase data and fit
-    ax.scatter(np.rad2deg(th_p), tau_p, alpha=0.5, s=30, color='tab:blue', label='Push Phase Data', zorder=3)
+    ax.scatter(np.rad2deg(th_p_plot), tau_p_plot, alpha=0.5, s=30, color='tab:blue', label='Push Phase Data', zorder=3)
     ax.plot(np.rad2deg(th_full), fit_p_curve, color='black', linewidth=2.5, label='Push Fit', zorder=4)
 
     # Plot retract phase data and fit
-    ax.scatter(np.rad2deg(th_r), tau_r, alpha=0.5, s=30, color='tab:orange', label='Retract Phase Data', zorder=3)
+    ax.scatter(np.rad2deg(th_r_plot), tau_r_plot, alpha=0.5, s=30, color='tab:orange', label='Retract Phase Data', zorder=3)
     ax.plot(np.rad2deg(th_full), fit_r_curve, color='gray', linewidth=2.5, label='Retract Fit', zorder=4)
 
     # Formatting
@@ -282,13 +399,48 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
     print(f"[OK] Saved plot to: {out_png}")
 
     plt.close(fig)
+    
+    # Calculate weights based on inverse MSE (better fit = higher weight)
+    eps = 1e-12
+    w_push = 1.0 / (fit_push["mse"] + eps)
+    w_retr = 1.0 / (fit_retr["mse"] + eps)
+    w_total = w_push + w_retr
+    
+    # Compute weighted averages
+    m_weighted = (w_push * fit_push["m"] + w_retr * fit_retr["m"]) / w_total
+    zc_weighted = (w_push * fit_push["zc"] + w_retr * fit_retr["zc"]) / w_total
+    ths_weighted = float(np.arctan2(estimator.d, zc_weighted))
+    
+    # Return fitted estimates with weighted average for CSV output
+    return {
+        "push": {
+            "m": fit_push["m"],
+            "zc": fit_push["zc"],
+            "ths": fit_push["ths"],
+            "mse": fit_push["mse"],
+        },
+        "retract": {
+            "m": fit_retr["m"],
+            "zc": fit_retr["zc"],
+            "ths": fit_retr["ths"],
+            "mse": fit_retr["mse"],
+        },
+        "weighted_avg": {
+            "m": m_weighted,
+            "zc": zc_weighted,
+            "ths": ths_weighted,
+        },
+        "weights": {
+            "push": w_push,
+            "retract": w_retr,
+            "total": w_total,
+        },
+    }
 
 
 def main():
     ap = argparse.ArgumentParser(description="Refit experimental data and regenerate fit plots for all n_safety trials")
     ap.add_argument("--csv_base", type=str, required=True, help="Base path for CSV files (without n_safety suffix). Example: /path/to/20260131_box")
-    ap.add_argument("--o_obj", type=float, nargs=3, default=[0.66, 0, 0], help="Object frame origin (default: [0.66, 0, 0])")
-    ap.add_argument("--rc0", type=float, nargs=3, default=[-0.05, 0, 0], help="Contact point offset (default: [-0.05, 0, 0])")
     ap.add_argument("--e_hat", type=float, nargs=3, default=[0.0, 1.0, 0.0], help="Rotation axis (default: [0, 1, 0])")
     args = ap.parse_args()
 
@@ -296,17 +448,32 @@ def main():
         raise SystemExit(f"Summary CSV not found: {SUMMARY_CSV_PATH}")
 
     summary_df = pd.read_csv(SUMMARY_CSV_PATH)
-    estimator = RefitEstimator(o_obj=args.o_obj, rc0_known=args.rc0, e_hat=args.e_hat)
-
+    
+    # Extract object name and get rc0 from ground truth definitions
     object_name = os.path.basename(args.csv_base).split("_")[-1].lower()
+    if object_name not in OBJECT_GROUND_TRUTH:
+        raise SystemExit(f"Object '{object_name}' not found in OBJECT_GROUND_TRUTH. Available: {list(OBJECT_GROUND_TRUTH.keys())}")
+    
+    rc0 = OBJECT_GROUND_TRUTH[object_name]["rc0_m"]
+    o_obj = [0.66, 0.0, 0.0]  # Fixed object frame origin (table location)
+    
+    estimator = RefitEstimator(o_obj=o_obj, rc0_known=rc0, e_hat=args.e_hat)
+    
     print(f"[INFO] Processing trials for object: {args.csv_base}")
-    print(f"[INFO] Using θ*_GT={THETA_STAR_GT_DEG:.1f}° and decimate={DECIMATE}")
+    print(f"[INFO] Using decimate={DECIMATE}")
     print(f"[INFO] Looking for n_safety trials: {N_SAFETY_VALUES}")
     print()
 
     success_count = 0
     fail_count = 0
     results = []
+    estimates_data = []  # Collect estimates for CSV export
+
+    # Get ground truth for this object
+    gt = OBJECT_GROUND_TRUTH.get(object_name, None)
+    if gt is None:
+        print(f"[WARNING] No ground truth defined for object '{object_name}'. Skipping error calculations.")
+        gt = {"m_kg": None, "zc_m": None, "theta_star_deg": None}
 
     for n_safety in N_SAFETY_VALUES:
         csv_path = f"{args.csv_base}_{n_safety:.3f}.csv"
@@ -320,10 +487,85 @@ def main():
         try:
             print(f"[PROCESSING] n_safety={n_safety:.3f} ({basename})...", end=" ")
             result = estimator.process(csv_path, summary_df, object_name, n_safety)
-            make_fit_plot(result, THETA_STAR_GT_DEG, csv_path, decimate=DECIMATE)
-            print(f"✓ m={result['m_est']:.3f}kg, z={result['zc_est']:.3f}m, θ*={np.rad2deg(result['ths_est']):.1f}°")
+            phase_estimates = make_fit_plot(result, gt['theta_star_deg'], csv_path, decimate=DECIMATE)
+            print(
+                f"✓ m={phase_estimates['weighted_avg']['m']:.3f}kg, "
+                f"z={phase_estimates['weighted_avg']['zc']:.3f}m, "
+                f"θ*={np.rad2deg(phase_estimates['weighted_avg']['ths']):.1f}°"
+            )
             success_count += 1
-            results.append((n_safety, result))
+            results.append((n_safety, phase_estimates))  # Store phase_estimates for final table
+            
+            # Helper function to calculate percent error
+            def calc_pct_error(est, gt_val):
+                if gt_val is None:
+                    return None
+                return 100.0 * abs(est - gt_val) / abs(gt_val) if gt_val != 0 else 0.0
+            
+            # Normalize weights so all three rows (push, retract, weighted_avg) sum to 1.0
+            w_push = phase_estimates["weights"]["push"]
+            w_retr = phase_estimates["weights"]["retract"]
+            w_total_all = w_push + w_retr + 1.0  # Include weighted_avg weight of 1.0
+            w_push_norm = w_push / w_total_all
+            w_retr_norm = w_retr / w_total_all
+            w_avg_norm = 1.0 / w_total_all
+            
+            # Collect push phase estimate
+            estimates_data.append({
+                "object": object_name,
+                "n_safety": round(n_safety, 3),
+                "phase": "push",
+                "m_est_kg": round(phase_estimates["push"]["m"], 3),
+                "zc_est_m": round(phase_estimates["push"]["zc"], 3),
+                "theta_star_est_deg": round(np.rad2deg(phase_estimates["push"]["ths"]), 3),
+                "weight": round(w_push_norm, 3),
+                "weight_push": round(phase_estimates["weights"]["push"], 3),
+                "weight_retract": round(phase_estimates["weights"]["retract"], 3),
+                "m_gt_kg": round(gt["m_kg"], 3) if gt["m_kg"] is not None else None,
+                "zc_gt_m": round(gt["zc_m"], 3) if gt["zc_m"] is not None else None,
+                "theta_star_gt_deg": round(gt["theta_star_deg"], 3) if gt["theta_star_deg"] is not None else None,
+                "m_error_pct": round(calc_pct_error(phase_estimates["push"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
+                "zc_error_pct": round(calc_pct_error(phase_estimates["push"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
+                "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["push"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
+            })
+            
+            # Collect retract phase estimate
+            estimates_data.append({
+                "object": object_name,
+                "n_safety": round(n_safety, 3),
+                "phase": "retract",
+                "m_est_kg": round(phase_estimates["retract"]["m"], 3),
+                "zc_est_m": round(phase_estimates["retract"]["zc"], 3),
+                "theta_star_est_deg": round(np.rad2deg(phase_estimates["retract"]["ths"]), 3),
+                "weight": round(w_retr_norm, 3),
+                "weight_push": round(phase_estimates["weights"]["push"], 3),
+                "weight_retract": round(phase_estimates["weights"]["retract"], 3),
+                "m_gt_kg": round(gt["m_kg"], 3) if gt["m_kg"] is not None else None,
+                "zc_gt_m": round(gt["zc_m"], 3) if gt["zc_m"] is not None else None,
+                "theta_star_gt_deg": round(gt["theta_star_deg"], 3) if gt["theta_star_deg"] is not None else None,
+                "m_error_pct": round(calc_pct_error(phase_estimates["retract"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
+                "zc_error_pct": round(calc_pct_error(phase_estimates["retract"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
+                "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["retract"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
+            })
+            
+            # Collect weighted average estimate
+            estimates_data.append({
+                "object": object_name,
+                "n_safety": round(n_safety, 3),
+                "phase": "weighted_avg",
+                "m_est_kg": round(phase_estimates["weighted_avg"]["m"], 3),
+                "zc_est_m": round(phase_estimates["weighted_avg"]["zc"], 3),
+                "theta_star_est_deg": round(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), 3),
+                "weight": round(w_avg_norm, 3),
+                "weight_push": round(phase_estimates["weights"]["push"], 3),
+                "weight_retract": round(phase_estimates["weights"]["retract"], 3),
+                "m_gt_kg": round(gt["m_kg"], 3) if gt["m_kg"] is not None else None,
+                "zc_gt_m": round(gt["zc_m"], 3) if gt["zc_m"] is not None else None,
+                "theta_star_gt_deg": round(gt["theta_star_deg"], 3) if gt["theta_star_deg"] is not None else None,
+                "m_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
+                "zc_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
+                "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
+            })
         except Exception as e:
             print(f"✗ FAILED: {e}")
             fail_count += 1
@@ -333,13 +575,25 @@ def main():
     if fail_count > 0:
         print(f"[WARNING] {fail_count} trials failed or were not found")
     
+    # Save estimates to CSV
+    if estimates_data:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        output_csv = os.path.join(script_dir, f"{object_name}_estimates.csv")
+        
+        estimates_df = pd.DataFrame(estimates_data)
+        estimates_df.to_csv(output_csv, index=False)
+        print(f"[OK] Saved estimates to: {output_csv}")
+    
     if results:
         print()
         print("[RESULTS TABLE]")
         print(f"{'n_safety':<10} {'m (kg)':<10} {'zc (m)':<10} {'θ* (deg)':<10}")
         print("-" * 40)
-        for ns, res in results:
-            print(f"{ns:<10.3f} {res['m_est']:<10.3f} {res['zc_est']:<10.3f} {np.rad2deg(res['ths_est']):<10.1f}")
+        for ns, phase_est in results:
+            print(f"{ns:<10.3f} {phase_est['weighted_avg']['m']:<10.3f} {phase_est['weighted_avg']['zc']:<10.3f} {np.rad2deg(phase_est['weighted_avg']['ths']):<10.1f}")
+        
+        # Print gt in terminal too
+        print(f"[GT]           {gt['m_kg']:<10.3f} {gt['zc_m']:<10.3f} {gt['theta_star_deg']:<10.1f}")
 
 
 if __name__ == "__main__":

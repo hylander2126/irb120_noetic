@@ -491,48 +491,6 @@ def make_push_compare_figure(summary: pd.DataFrame, out_png: str, title_suffix: 
     plt.close(fig)
     return True, None
 
-def load_per_object_estimates(csv_dir: str):
-    """
-    Load per-object estimate CSVs (e.g., box_estimates.csv, heart_estimates.csv) 
-    and extract weighted_avg rows for plotting.
-    
-    Returns summary_wide DataFrame with columns needed for make_main_figure().
-    """
-    rows = []
-    for obj in OBJECT_ORDER:
-        csv_path = os.path.join(csv_dir, f"{obj}_estimates.csv")
-        if not os.path.exists(csv_path):
-            print(f"[WARN] Missing {obj}_estimates.csv, skipping {obj}")
-            continue
-        
-        df = pd.read_csv(csv_path)
-        # Filter for weighted_avg phase only
-        weighted = df[df["phase"] == "weighted_avg"].copy()
-        
-        if weighted.empty:
-            print(f"[WARN] No weighted_avg rows in {obj}_estimates.csv")
-            continue
-        
-        # Rename columns to match expected format
-        weighted = weighted.rename(columns={
-            "m_est_kg": "m_est_mean_kg",
-            "zc_est_m": "zc_est_mean_m",
-            "theta_star_est_deg": "theta_star_est_mean_deg",
-            "m_error_pct": "m_err_pct",
-            "zc_error_pct": "zc_err_pct",
-            "theta_star_error_pct": "theta_star_err_pct",
-        })
-        
-        rows.append(weighted[["object", "n_safety", "m_est_mean_kg", "zc_est_mean_m", 
-                               "theta_star_est_mean_deg", "m_err_pct", "zc_err_pct", 
-                               "theta_star_err_pct"]])
-    
-    if not rows:
-        raise SystemExit("No valid per-object estimate CSVs found")
-    
-    summary = pd.concat(rows, ignore_index=True)
-    return summary
-
 def _default_out_paths(txt_dir: str):
     # out_csv = os.path.join(txt_dir, "summary_by_object_nsafety_phase.csv")
     out_csv = "./summary_by_object_nsafety_phase.csv"
@@ -546,7 +504,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--txt_dir", type=str, default=None, help="Directory of .txt fit summaries to parse")
     ap.add_argument("--in_csv", type=str, default=None, help="Use an existing CSV instead of parsing txt")
-    ap.add_argument("--estimate_csv_dir", type=str, default=None, help="Directory with per-object estimate CSVs (box_estimates.csv, etc.)")
     ap.add_argument("--out_csv", type=str, default=None, help="Where to write phase-level CSV (primary output)")
     ap.add_argument("--out_csv_combined", type=str, default=None, help="Where to write combined-level CSV (not used)")
     ap.add_argument("--out_png", type=str, default=None, help="Where to write main performance PNG figure")
@@ -555,20 +512,10 @@ def main():
     ap.add_argument("--strict_two_pushes", action="store_true", help="Require exactly 2 pushes in each txt (auto-enabled with --use_both_pushes)")
     args = ap.parse_args()
 
-    if args.txt_dir is None and args.in_csv is None and args.estimate_csv_dir is None:
-        raise SystemExit("Provide either --txt_dir, --in_csv, or --estimate_csv_dir")
+    if args.txt_dir is None and args.in_csv is None:
+        raise SystemExit("Provide either --txt_dir or --in_csv")
 
-    if args.estimate_csv_dir is not None:
-        # NEW mode: load per-object estimate CSVs
-        out_png = args.out_png or "./NEW_estimation_performance_summary.png"
-        
-        summary_wide = load_per_object_estimates(args.estimate_csv_dir)
-        
-        make_main_figure(summary_wide, out_png, title_suffix=" (Refit)")
-        print(f"[OK] Wrote NEW figure from per-object estimates: {out_png}")
-        print(f"[INFO] Used weighted_avg phase from {len(summary_wide)} rows")
-        
-    elif args.txt_dir is not None:
+    if args.txt_dir is not None:
         out_csv, out_png, out_png_push = _default_out_paths(args.txt_dir)
         out_csv = args.out_csv or out_csv
         out_png = args.out_png or out_png
