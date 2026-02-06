@@ -36,6 +36,7 @@ Usage:
 import argparse
 import os
 import glob
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -46,37 +47,13 @@ from scipy.stats import linregress
 # ===== CONFIGURATION =====
 DECIMATE = 40  # Data point decimation factor - adjust for readability
 N_SAFETY_VALUES = [0.100, 0.500, 0.650]  # n_safety trials to process
-SUMMARY_CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summary_by_object_nsafety_phase.csv")
 
-# ===== OBJECT GROUND TRUTH VALUES =====
-# Define ground truth parameters for each object here (mass in kg, zc in m, theta_star in degrees)
-OBJECT_GROUND_TRUTH = {
-    "box": {
-        "m_kg": 0.658, # 0.664
-        "zc_m": 0.14624,
-        "rc0_m": [-0.04515, 0, 0],
-        "theta_star_deg": np.rad2deg(np.arctan2(0.04515, 0.14624)), # atan((x^2 + y^2)^0.5 / z)
-    },
-    "heart": {
-        "m_kg": 0.236,
-        "zc_m": 0.098,
-        "rc0_m": [-0.04354, 0, 0],
-        "theta_star_deg": np.rad2deg(np.arctan2(0.04354, 0.098)),
-    },
-    "monitor": {
-        "m_kg": 5.040, # 5.008
-        "zc_m": 0.2316, # 0.2516 # 0.2316 close...
-        "rc0_m": [-0.06107, 0, 0],# [-0.06207, 0, 0], 0.06107 close
-        "theta_star_deg": np.rad2deg(np.arctan2(0.06107, 0.2316)),
-    },
-    "flashlight": {
-        "m_kg": 0.387,
-        "zc_m": 0.09656,
-        "rc0_m": [-0.0230, 0, 0],
-        "theta_star_deg": np.rad2deg(np.arctan2(0.0230, 0.09656)),
-    },
-}
-# =========================
+# Load ground truth from JSON
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GT_JSON_PATH = os.path.join(SCRIPT_DIR, "ground_truth.json")
+
+with open(GT_JSON_PATH, 'r') as f:
+    OBJECT_GROUND_TRUTH = json.load(f)
 
 # Import com_3d utilities
 import sys
@@ -107,13 +84,19 @@ class RefitEstimator:
         tau_vec_orig = np.asarray(tau_vec, float).reshape(-1, 3)
         
         # Exclude first ~2 degrees where transients and outliers cluster
+        # and final ~1 degree where transition effects occur
         theta_min = np.deg2rad(2.0)
-        valid_theta_mask = th_orig >= theta_min
+        theta_max = np.max(th_orig) - np.deg2rad(1.0)
+        valid_theta_mask = (th_orig >= theta_min) & (th_orig <= theta_max)
         valid_theta_indices = np.where(valid_theta_mask)[0]
         
         th = th_orig[valid_theta_mask]
         tau_vec = tau_vec_orig[valid_theta_mask]
         tau_proj = tau_vec @ self.e_hat  # (N,)
+        
+        # Check if we have enough data after filtering
+        if len(th) < 10:
+            return None  # Insufficient data after filtering
 
         # Linear seed
         slope, intercept, *_ = linregress(th, tau_proj)
@@ -165,7 +148,7 @@ class RefitEstimator:
         }
 
 
-    def process(self, csv_path, summary_df, object_name, n_safety, q_ref=None):
+    def process(self, csv_path, q_ref=None):
         """
         Load CSV, process masks, and use summary estimates for push/retract fits.
         
@@ -245,43 +228,7 @@ class RefitEstimator:
         tau_push = _get_raveled_tapp(ee_push, f_push)
         tau_retr = _get_raveled_tapp(ee_retr, f_retr)
 
-        # Pull experiment estimates from summary CSV
-        def _get_phase_est(phase: str):
-            sel = summary_df[
-                (summary_df["object"] == object_name)
-                & (summary_df["n_safety"] == float(n_safety))
-                & (summary_df["push_idx"] == 1)
-                & (summary_df["phase"] == phase)
-            ]
-            if sel.empty:
-                raise ValueError(f"No summary estimates for {object_name}, n_safety={n_safety:.3f}, phase={phase}")
-            row = sel.iloc[0]
-            return {
-                "m": float(row["m_est_kg"]),
-                "zc": float(row["zc_est_m"]),
-                "ths_deg": float(row["theta_star_est_deg"]),
-                "weight": float(row["weight"]),
-            }
-
-        fit_push = _get_phase_est("push")
-        fit_retr = _get_phase_est("retract")
-
-        # Combined estimate for annotation (weighted average using CSV weights)
-        w_push = fit_push["weight"]
-        w_retr = fit_retr["weight"]
-        w_total = w_push + w_retr
-        
-        m_est = (w_push * fit_push["m"] + w_retr * fit_retr["m"]) / w_total
-        zc_est = (w_push * fit_push["zc"] + w_retr * fit_retr["zc"]) / w_total
-        ths_est_deg = (w_push * fit_push["ths_deg"] + w_retr * fit_retr["ths_deg"]) / w_total
-        ths_est = float(np.deg2rad(ths_est_deg))
-
         return {
-            "fit_push": fit_push,
-            "fit_retr": fit_retr,
-            "m_est": m_est,
-            "zc_est": zc_est,
-            "ths_est": ths_est,
             "th_push": th_push,
             "tau_push": tau_push,
             "th_retr": th_retr,
@@ -292,7 +239,7 @@ class RefitEstimator:
         }
 
 
-def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
+def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1, use_weighted_avg=False):
     """
     Generate fit plot with scatter data and fitted curves.
     
@@ -301,6 +248,7 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
         theta_star_gt_deg: ground truth theta_star in degrees
         csv_path: path to source CSV (used to determine output filename)
         decimate: downsample factor for data points (1 = no decimation)
+        use_weighted_avg: if True, use MSE-based weighted average; if False, use regular mean
     """
     estimator = process_result["estimator"]
     
@@ -319,10 +267,17 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
     # FIT the data to get parameters (not use pre-computed summaries)
     fit_push = estimator._fit_phase_params(th_p, tau_p_vec)
     fit_retr = estimator._fit_phase_params(th_r, tau_r_vec)
+    
+    # Check if either phase failed
+    has_push = fit_push is not None
+    has_retr = fit_retr is not None
+    
+    if not has_push and not has_retr:
+        raise ValueError("Both phases have insufficient data after filtering")
 
-    # Extract inlier indices for each phase
-    inlier_idx_push = fit_push["inlier_indices"]
-    inlier_idx_retr = fit_retr["inlier_indices"]
+    # Extract inlier indices for each phase (only if phase is valid)
+    inlier_idx_push = fit_push["inlier_indices"] if has_push else np.array([], dtype=int)
+    inlier_idx_retr = fit_retr["inlier_indices"] if has_retr else np.array([], dtype=int)
     
     # Extract only inliers for plotting
     th_p_inliers = th_p[inlier_idx_push]
@@ -330,12 +285,41 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
     th_r_inliers = th_r[inlier_idx_retr]
     tau_r_inliers = tau_r[inlier_idx_retr]
 
-    # Weighted combined estimate
-    w_push = 1.0  # Equal weighting for fitting
-    w_retr = 1.0
-    m_est = (w_push * fit_push["m"] + w_retr * fit_retr["m"]) / (w_push + w_retr)
-    zc_est = (w_push * fit_push["zc"] + w_retr * fit_retr["zc"]) / (w_push + w_retr)
-    ths_est = float(np.arctan2(estimator.d, zc_est))
+    # Calculate weights based on user option and available phases
+    if has_push and has_retr:
+        # Both phases available
+        if use_weighted_avg:
+            # MSE-based weights (better fit = higher weight)
+            eps = 1e-12
+            w_push = 1.0 / (fit_push["mse"] + eps)
+            w_retr = 1.0 / (fit_retr["mse"] + eps)
+            w_total = w_push + w_retr
+        else:
+            # Regular mean: equal weights
+            w_push = 0.5
+            w_retr = 0.5
+            w_total = 1.0
+        
+        # Combined estimate (weighted average or regular mean)
+        m_est = (w_push * fit_push["m"] + w_retr * fit_retr["m"]) / w_total
+        zc_est = (w_push * fit_push["zc"] + w_retr * fit_retr["zc"]) / w_total
+        ths_est = float(np.arctan2(estimator.d, zc_est))
+    elif has_push:
+        # Only push phase available
+        w_push = 1.0
+        w_retr = 0.0
+        w_total = 1.0
+        m_est = fit_push["m"]
+        zc_est = fit_push["zc"]
+        ths_est = fit_push["ths"]
+    else:
+        # Only retract phase available
+        w_push = 0.0
+        w_retr = 1.0
+        w_total = 1.0
+        m_est = fit_retr["m"]
+        zc_est = fit_retr["zc"]
+        ths_est = fit_retr["ths"]
 
     # Decimate for display (only inliers)
     if decimate > 1:
@@ -350,7 +334,12 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
         tau_r_plot = tau_r_inliers
 
     # Generate smooth fit curves over full range
-    th_full = np.linspace(0, max(np.concatenate([th_p_inliers, th_r_inliers])) * 1.05, 200)
+    valid_inliers = []
+    if len(th_p_inliers) > 0:
+        valid_inliers.append(th_p_inliers)
+    if len(th_r_inliers) > 0:
+        valid_inliers.append(th_r_inliers)
+    th_full = np.linspace(0, max(np.concatenate(valid_inliers)) * 1.05, 200)
     
     def tau_scalar(th, m, zc):
         """Compute scalar torque projection onto e_hat."""
@@ -358,11 +347,11 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
         tau_vec_reshaped = tau_vec.reshape(-1, 3)
         return tau_vec_reshaped @ e_hat
 
-    fit_p_curve = tau_scalar(th_full, fit_push["m"], fit_push["zc"])
-    fit_r_curve = tau_scalar(th_full, fit_retr["m"], fit_retr["zc"])
+    fit_p_curve = tau_scalar(th_full, fit_push["m"], fit_push["zc"]) if has_push else None
+    fit_r_curve = tau_scalar(th_full, fit_retr["m"], fit_retr["zc"]) if has_retr else None
 
     # Create figure
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(8, 4.5))
 
     # Plot ground truth line
     ax.axvline(theta_star_gt_deg, color='green', linestyle='--', linewidth=2.5, label=f'GT θ* ({theta_star_gt_deg:.1f}°)', zorder=2)
@@ -373,20 +362,22 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
     # Horizontal zero line cyan
     ax.axhline(0, color='cyan', linewidth=1.5, label='_', zorder=2)
                
-    # Plot push phase data and fit
-    ax.scatter(np.rad2deg(th_p_plot), tau_p_plot, alpha=0.5, s=30, color='tab:blue', label='Push Phase Data', zorder=3)
-    ax.plot(np.rad2deg(th_full), fit_p_curve, color='black', linewidth=2.5, label='Push Fit', zorder=4)
+    # Plot push phase data and fit (if available)
+    if has_push and len(th_p_plot) > 0:
+        ax.scatter(np.rad2deg(th_p_plot), tau_p_plot, alpha=0.5, s=30, color='tab:blue', label='Push Phase Data', zorder=3)
+        ax.plot(np.rad2deg(th_full), fit_p_curve, color='black', linewidth=2.5, label='_', zorder=4)
 
-    # Plot retract phase data and fit
-    ax.scatter(np.rad2deg(th_r_plot), tau_r_plot, alpha=0.5, s=30, color='tab:orange', label='Retract Phase Data', zorder=3)
-    ax.plot(np.rad2deg(th_full), fit_r_curve, color='gray', linewidth=2.5, label='Retract Fit', zorder=4)
+    # Plot retract phase data and fit (if available)
+    if has_retr and len(th_r_plot) > 0:
+        ax.scatter(np.rad2deg(th_r_plot), tau_r_plot, alpha=0.5, s=30, color='tab:orange', label='Retract Phase Data', zorder=3)
+        ax.plot(np.rad2deg(th_full), fit_r_curve, color='gray', linewidth=2.5, label='_', zorder=4)
 
     # Formatting
     ax.set_ylim(bottom=-0.01) # Set lower lim just below zero
     ax.set_xlabel('Object Angle (deg)', fontsize=16)
     ax.set_ylabel('Torque (N-m)', fontsize=16)
     ax.grid(True, alpha=0.35)
-    ax.legend(loc='upper right', fontsize=12, framealpha=0.95)
+    ax.legend(loc='upper right', fontsize=14, framealpha=0.95)
     ax.tick_params(axis='both', labelsize=14)
 
     fig.tight_layout()
@@ -400,41 +391,33 @@ def make_fit_plot(process_result, theta_star_gt_deg, csv_path, decimate=1):
 
     plt.close(fig)
     
-    # Calculate weights based on inverse MSE (better fit = higher weight)
-    eps = 1e-12
-    w_push = 1.0 / (fit_push["mse"] + eps)
-    w_retr = 1.0 / (fit_retr["mse"] + eps)
-    w_total = w_push + w_retr
-    
-    # Compute weighted averages
-    m_weighted = (w_push * fit_push["m"] + w_retr * fit_retr["m"]) / w_total
-    zc_weighted = (w_push * fit_push["zc"] + w_retr * fit_retr["zc"]) / w_total
-    ths_weighted = float(np.arctan2(estimator.d, zc_weighted))
-    
     # Return fitted estimates with weighted average for CSV output
+    # Note: m_est, zc_est, ths_est already calculated above
     return {
         "push": {
             "m": fit_push["m"],
             "zc": fit_push["zc"],
             "ths": fit_push["ths"],
             "mse": fit_push["mse"],
-        },
+        } if has_push else None,
         "retract": {
             "m": fit_retr["m"],
             "zc": fit_retr["zc"],
             "ths": fit_retr["ths"],
             "mse": fit_retr["mse"],
-        },
+        } if has_retr else None,
         "weighted_avg": {
-            "m": m_weighted,
-            "zc": zc_weighted,
-            "ths": ths_weighted,
+            "m": m_est,
+            "zc": zc_est,
+            "ths": ths_est,
         },
         "weights": {
             "push": w_push,
             "retract": w_retr,
             "total": w_total,
         },
+        "has_push": has_push,
+        "has_retr": has_retr,
     }
 
 
@@ -442,13 +425,9 @@ def main():
     ap = argparse.ArgumentParser(description="Refit experimental data and regenerate fit plots for all n_safety trials")
     ap.add_argument("--csv_base", type=str, required=True, help="Base path for CSV files (without n_safety suffix). Example: /path/to/20260131_box")
     ap.add_argument("--e_hat", type=float, nargs=3, default=[0.0, 1.0, 0.0], help="Rotation axis (default: [0, 1, 0])")
+    ap.add_argument("--weighted_avg", action="store_true", help="Use MSE-based weighted average (default: regular mean)")
     args = ap.parse_args()
 
-    if not os.path.exists(SUMMARY_CSV_PATH):
-        raise SystemExit(f"Summary CSV not found: {SUMMARY_CSV_PATH}")
-
-    summary_df = pd.read_csv(SUMMARY_CSV_PATH)
-    
     # Extract object name and get rc0 from ground truth definitions
     object_name = os.path.basename(args.csv_base).split("_")[-1].lower()
     if object_name not in OBJECT_GROUND_TRUTH:
@@ -485,9 +464,10 @@ def main():
 
         basename = os.path.basename(csv_path)
         try:
+            start_len = len(estimates_data)
             print(f"[PROCESSING] n_safety={n_safety:.3f} ({basename})...", end=" ")
-            result = estimator.process(csv_path, summary_df, object_name, n_safety)
-            phase_estimates = make_fit_plot(result, gt['theta_star_deg'], csv_path, decimate=DECIMATE)
+            result = estimator.process(csv_path)
+            phase_estimates = make_fit_plot(result, gt['theta_star_deg'], csv_path, decimate=DECIMATE, use_weighted_avg=args.weighted_avg)
             print(
                 f"✓ m={phase_estimates['weighted_avg']['m']:.3f}kg, "
                 f"z={phase_estimates['weighted_avg']['zc']:.3f}m, "
@@ -502,51 +482,57 @@ def main():
                     return None
                 return 100.0 * abs(est - gt_val) / abs(gt_val) if gt_val != 0 else 0.0
             
-            # Normalize weights so all three rows (push, retract, weighted_avg) sum to 1.0
+            # Get raw weights from phase_estimates
             w_push = phase_estimates["weights"]["push"]
             w_retr = phase_estimates["weights"]["retract"]
-            w_total_all = w_push + w_retr + 1.0  # Include weighted_avg weight of 1.0
-            w_push_norm = w_push / w_total_all
-            w_retr_norm = w_retr / w_total_all
-            w_avg_norm = 1.0 / w_total_all
+            has_push = phase_estimates["has_push"]
+            has_retr = phase_estimates["has_retr"]
             
-            # Collect push phase estimate
-            estimates_data.append({
-                "object": object_name,
-                "n_safety": round(n_safety, 3),
-                "phase": "push",
-                "m_est_kg": round(phase_estimates["push"]["m"], 3),
-                "zc_est_m": round(phase_estimates["push"]["zc"], 3),
-                "theta_star_est_deg": round(np.rad2deg(phase_estimates["push"]["ths"]), 3),
-                "weight": round(w_push_norm, 3),
-                "weight_push": round(phase_estimates["weights"]["push"], 3),
-                "weight_retract": round(phase_estimates["weights"]["retract"], 3),
-                "m_gt_kg": round(gt["m_kg"], 3) if gt["m_kg"] is not None else None,
-                "zc_gt_m": round(gt["zc_m"], 3) if gt["zc_m"] is not None else None,
-                "theta_star_gt_deg": round(gt["theta_star_deg"], 3) if gt["theta_star_deg"] is not None else None,
-                "m_error_pct": round(calc_pct_error(phase_estimates["push"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
-                "zc_error_pct": round(calc_pct_error(phase_estimates["push"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
-                "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["push"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
-            })
+            # For CSV output: use weights directly (already 0.5 for mean, MSE-based for weighted)
+            # Normalize so all three rows (push, retract, weighted_avg) sum to 1.0
+            if args.weighted_avg:
+                # MSE-based weights need normalization
+                w_total_all = w_push + w_retr + 1.0  # Include weighted_avg weight of 1.0
+                w_push_norm = w_push / w_total_all
+                w_retr_norm = w_retr / w_total_all
+                w_avg_norm = 1.0 / w_total_all
+            else:
+                # Regular mean: equal weights (0.5 each), no normalization needed for this scheme
+                # But to make all three rows sum to 1.0, we use the same normalization approach
+                w_total_all = 0.5 + 0.5 + 1.0  # = 2.0
+                w_push_norm = 0.5 / w_total_all  # = 0.25
+                w_retr_norm = 0.5 / w_total_all  # = 0.25
+                w_avg_norm = 1.0 / w_total_all   # = 0.5
             
-            # Collect retract phase estimate
-            estimates_data.append({
-                "object": object_name,
-                "n_safety": round(n_safety, 3),
-                "phase": "retract",
-                "m_est_kg": round(phase_estimates["retract"]["m"], 3),
-                "zc_est_m": round(phase_estimates["retract"]["zc"], 3),
-                "theta_star_est_deg": round(np.rad2deg(phase_estimates["retract"]["ths"]), 3),
-                "weight": round(w_retr_norm, 3),
-                "weight_push": round(phase_estimates["weights"]["push"], 3),
-                "weight_retract": round(phase_estimates["weights"]["retract"], 3),
-                "m_gt_kg": round(gt["m_kg"], 3) if gt["m_kg"] is not None else None,
-                "zc_gt_m": round(gt["zc_m"], 3) if gt["zc_m"] is not None else None,
-                "theta_star_gt_deg": round(gt["theta_star_deg"], 3) if gt["theta_star_deg"] is not None else None,
-                "m_error_pct": round(calc_pct_error(phase_estimates["retract"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
-                "zc_error_pct": round(calc_pct_error(phase_estimates["retract"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
-                "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["retract"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
-            })
+            # Collect push phase estimate (only if available)
+            if has_push:
+                estimates_data.append({
+                    "object": object_name,
+                    "n_safety": round(n_safety, 3),
+                    "phase": "push",
+                    "m_est_kg": round(phase_estimates["push"]["m"], 3),
+                    "zc_est_m": round(phase_estimates["push"]["zc"], 3),
+                    "theta_star_est_deg": round(np.rad2deg(phase_estimates["push"]["ths"]), 3),
+                    "m_error_pct": round(calc_pct_error(phase_estimates["push"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
+                    "zc_error_pct": round(calc_pct_error(phase_estimates["push"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
+                    "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["push"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
+                    "weight": round(w_push_norm, 3),
+                })
+            
+            # Collect retract phase estimate (only if available)
+            if has_retr:
+                estimates_data.append({
+                    "object": object_name,
+                    "n_safety": round(n_safety, 3),
+                    "phase": "retract",
+                    "m_est_kg": round(phase_estimates["retract"]["m"], 3),
+                    "zc_est_m": round(phase_estimates["retract"]["zc"], 3),
+                    "theta_star_est_deg": round(np.rad2deg(phase_estimates["retract"]["ths"]), 3),
+                    "m_error_pct": round(calc_pct_error(phase_estimates["retract"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
+                    "zc_error_pct": round(calc_pct_error(phase_estimates["retract"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
+                    "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["retract"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
+                    "weight": round(w_retr_norm, 3),
+                })
             
             # Collect weighted average estimate
             estimates_data.append({
@@ -556,16 +542,26 @@ def main():
                 "m_est_kg": round(phase_estimates["weighted_avg"]["m"], 3),
                 "zc_est_m": round(phase_estimates["weighted_avg"]["zc"], 3),
                 "theta_star_est_deg": round(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), 3),
-                "weight": round(w_avg_norm, 3),
-                "weight_push": round(phase_estimates["weights"]["push"], 3),
-                "weight_retract": round(phase_estimates["weights"]["retract"], 3),
-                "m_gt_kg": round(gt["m_kg"], 3) if gt["m_kg"] is not None else None,
-                "zc_gt_m": round(gt["zc_m"], 3) if gt["zc_m"] is not None else None,
-                "theta_star_gt_deg": round(gt["theta_star_deg"], 3) if gt["theta_star_deg"] is not None else None,
                 "m_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
                 "zc_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
                 "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
+                "weight": round(w_avg_norm, 3),
             })
+
+            # Insert a blank row between n_safety groups (if we added any rows)
+            if len(estimates_data) > start_len:
+                estimates_data.append({
+                    "object": None,
+                    "n_safety": None,
+                    "phase": None,
+                    "m_est_kg": None,
+                    "zc_est_m": None,
+                    "theta_star_est_deg": None,
+                    "m_error_pct": None,
+                    "zc_error_pct": None,
+                    "theta_star_error_pct": None,
+                    "weight": None,
+                })
         except Exception as e:
             print(f"✗ FAILED: {e}")
             fail_count += 1
@@ -593,7 +589,7 @@ def main():
             print(f"{ns:<10.3f} {phase_est['weighted_avg']['m']:<10.3f} {phase_est['weighted_avg']['zc']:<10.3f} {np.rad2deg(phase_est['weighted_avg']['ths']):<10.1f}")
         
         # Print gt in terminal too
-        print(f"[GT]           {gt['m_kg']:<10.3f} {gt['zc_m']:<10.3f} {gt['theta_star_deg']:<10.1f}")
+        print(f"[GT]       {gt['m_kg']:<10.3f} {gt['zc_m']:<10.3f} {gt['theta_star_deg']:<10.1f}")
 
 
 if __name__ == "__main__":
