@@ -508,44 +508,44 @@ def main():
             if has_push:
                 estimates_data.append({
                     "object": object_name,
-                    "n_safety": round(n_safety, 3),
+                    "n_safety": round(n_safety, 5),
                     "phase": "push",
-                    "m_est_kg": round(phase_estimates["push"]["m"], 3),
-                    "zc_est_m": round(phase_estimates["push"]["zc"], 3),
-                    "theta_star_est_deg": round(np.rad2deg(phase_estimates["push"]["ths"]), 3),
-                    "m_error_pct": round(calc_pct_error(phase_estimates["push"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
-                    "zc_error_pct": round(calc_pct_error(phase_estimates["push"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
-                    "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["push"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
-                    "weight": round(w_push_norm, 3),
+                    "m_est_kg": round(phase_estimates["push"]["m"], 5),
+                    "zc_est_m": round(phase_estimates["push"]["zc"], 5),
+                    "theta_star_est_deg": round(np.rad2deg(phase_estimates["push"]["ths"]), 5),
+                    "m_error_pct": round(calc_pct_error(phase_estimates["push"]["m"], gt["m_kg"]), 5) if gt["m_kg"] is not None else None,
+                    "zc_error_pct": round(calc_pct_error(phase_estimates["push"]["zc"], gt["zc_m"]), 5) if gt["zc_m"] is not None else None,
+                    "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["push"]["ths"]), gt["theta_star_deg"]), 5) if gt["theta_star_deg"] is not None else None,
+                    "weight": round(w_push_norm, 5),
                 })
             
             # Collect retract phase estimate (only if available)
             if has_retr:
                 estimates_data.append({
                     "object": object_name,
-                    "n_safety": round(n_safety, 3),
+                    "n_safety": round(n_safety, 5),
                     "phase": "retract",
-                    "m_est_kg": round(phase_estimates["retract"]["m"], 3),
-                    "zc_est_m": round(phase_estimates["retract"]["zc"], 3),
-                    "theta_star_est_deg": round(np.rad2deg(phase_estimates["retract"]["ths"]), 3),
-                    "m_error_pct": round(calc_pct_error(phase_estimates["retract"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
-                    "zc_error_pct": round(calc_pct_error(phase_estimates["retract"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
-                    "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["retract"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
-                    "weight": round(w_retr_norm, 3),
+                    "m_est_kg": round(phase_estimates["retract"]["m"], 5),
+                    "zc_est_m": round(phase_estimates["retract"]["zc"], 5),
+                    "theta_star_est_deg": round(np.rad2deg(phase_estimates["retract"]["ths"]), 5),
+                    "m_error_pct": round(calc_pct_error(phase_estimates["retract"]["m"], gt["m_kg"]), 5) if gt["m_kg"] is not None else None,
+                    "zc_error_pct": round(calc_pct_error(phase_estimates["retract"]["zc"], gt["zc_m"]), 5) if gt["zc_m"] is not None else None,
+                    "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["retract"]["ths"]), gt["theta_star_deg"]), 5) if gt["theta_star_deg"] is not None else None,
+                    "weight": round(w_retr_norm, 5),
                 })
             
             # Collect weighted average estimate
             estimates_data.append({
                 "object": object_name,
-                "n_safety": round(n_safety, 3),
+                "n_safety": round(n_safety, 5),
                 "phase": "weighted_avg",
-                "m_est_kg": round(phase_estimates["weighted_avg"]["m"], 3),
-                "zc_est_m": round(phase_estimates["weighted_avg"]["zc"], 3),
-                "theta_star_est_deg": round(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), 3),
-                "m_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["m"], gt["m_kg"]), 3) if gt["m_kg"] is not None else None,
-                "zc_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["zc"], gt["zc_m"]), 3) if gt["zc_m"] is not None else None,
-                "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), gt["theta_star_deg"]), 3) if gt["theta_star_deg"] is not None else None,
-                "weight": round(w_avg_norm, 3),
+                "m_est_kg": round(phase_estimates["weighted_avg"]["m"], 5),
+                "zc_est_m": round(phase_estimates["weighted_avg"]["zc"], 5),
+                "theta_star_est_deg": round(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), 5),
+                "m_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["m"], gt["m_kg"]), 5) if gt["m_kg"] is not None else None,
+                "zc_error_pct": round(calc_pct_error(phase_estimates["weighted_avg"]["zc"], gt["zc_m"]), 5) if gt["zc_m"] is not None else None,
+                "theta_star_error_pct": round(calc_pct_error(np.rad2deg(phase_estimates["weighted_avg"]["ths"]), gt["theta_star_deg"]), 5) if gt["theta_star_deg"] is not None else None,
+                "weight": round(w_avg_norm, 5),
             })
 
             # Insert a blank row between n_safety groups (if we added any rows)
